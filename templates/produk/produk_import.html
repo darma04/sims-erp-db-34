@@ -74,6 +74,7 @@
                         <li><strong>harga_beli</strong> (opsional,default: 0)</li>
                         <li><strong>harga_jual</strong> (opsional, default: 0)</li>
                         <li><strong>stok</strong> (opsional, default: 0)</li>
+                        <li><strong>gudang</strong> (opsional, nama/kode gudang)</li>
                         <li><strong>deskripsi</strong> (opsional)</li>
                         <li><strong>barcode</strong> (opsional)</li>
                     </ul>
@@ -100,10 +101,10 @@
 <script>
 function downloadTemplate(format) {
     // Header order: nama (required) first, then optional fields INCLUDING stok
-    const header = ['nama', 'sku', 'kategori', 'satuan', 'harga_beli', 'harga_jual', 'stok', 'deskripsi', 'barcode'];
+    const header = ['nama', 'sku', 'kategori', 'satuan', 'harga_beli', 'harga_jual', 'stok', 'gudang', 'deskripsi', 'barcode'];
     const sampleData = [
-        ['Contoh Produk 1', 'PRD-00001', 'Elektronik', 'pcs', '100000', '150000', '50', 'Deskripsi produk 1', '1234567890'],
-        ['Contoh Produk 2', 'PRD-00002', 'Makanan', 'box', '50000', '75000', '25', 'Deskripsi produk 2', '0987654321']
+        ['Contoh Produk 1', 'PRD-00001', 'Elektronik', 'pcs', '100000', '150000', '50', 'Gudang Utama', 'Deskripsi produk 1', '1234567890'],
+        ['Contoh Produk 2', 'PRD-00002', 'Makanan', 'box', '50000', '75000', '25', 'Gudang Cabang', 'Deskripsi produk 2', '0987654321']
     ];
     
     let blob, filename;

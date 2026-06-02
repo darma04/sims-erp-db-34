@@ -1,0 +1,255 @@
+{% extends 'layout/layout_vertical.html' %}
+{% comment %}
+==========================================================================
+   PURCHASE ORDER IMPORT - Import Pembelian dari Excel/CSV
+   Halaman untuk mengimport data Purchase Order secara massal dari file Excel/CSV.
+   Menampilkan format template dan proses upload.
+   Kolom: supplier, gudang, nama_produk, tipe, kategori, satuan, jumlah, harga_satuan, catatan, pajak, metode_pembayaran
+   ==========================================================================
+{% endcomment %}
+{% load static %}
+
+{% block title %}Import Pembelian - ERP{% endblock title %}
+
+{% block vendor_css %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'vendor/libs/sweetalert2/sweetalert2.css' %}" />
+{% endblock vendor_css %}
+
+{% block vendor_js %}
+{{ block.super }}
+<script src="{% static 'vendor/libs/sweetalert2/sweetalert2.js' %}"></script>
+{% endblock vendor_js %}
+
+{% block content %}
+<div class="container-xxl flex-grow-1 container-p-y">
+    <h4 class="py-3 mb-4">
+        <span class="text-muted fw-light">Pembelian /</span> Import Purchase Order
+    </h4>
+
+    {% if messages %}
+    {% for message in messages %}
+    <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+        {{ message }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card mb-4">
+                <h5 class="card-header">Upload File Purchase Order</h5>
+                <div class="card-body">
+                    <form method="POST" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="mb-3">
+                            <label for="file" class="form-label">Pilih File Excel atau CSV</label>
+                            <input class="form-control" type="file" id="file" name="file" 
+                                   accept=".csv,.xlsx,.xls" required>
+                            <small class="text-muted">Format: CSV, XLSX, atau XLS. Maks 10MB</small>
+                        </div>
+                        <div class="mt-3">
+                            <button type="submit" class="btn btn-primary me-2">
+                                <i class="ri-upload-2-line me-1"></i>Upload & Import
+                            </button>
+                            <a href="{% url 'pembelian:purchase-order' %}" class="btn btn-outline-secondary">Batal</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Penjelasan Logika Import -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <h6 class="mb-3"><i class="ri-lightbulb-line me-1 text-warning"></i>Cara Kerja Import</h6>
+                    <ul class="small mb-0">
+                        <li>Setiap baris CSV/Excel = <strong>1 item pembelian</strong></li>
+                        <li>Baris yang memiliki <strong>supplier & gudang sama</strong> akan dikelompokkan menjadi <strong>1 PO</strong></li>
+                        <li>Produk baru <strong>otomatis dibuat</strong> dengan SKU auto-generate dan harga jual markup 20%</li>
+                        <li>Supplier baru <strong>otomatis dibuat</strong> jika belum ada di database</li>
+                        <li>Stok langsung ditambahkan ke gudang tujuan (status PO = <span class="badge bg-success">Diterima</span>)</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card bg-light">
+                <div class="card-body">
+                    <h5 class="card-title">
+                        <i class="ri-information-line me-2"></i>Panduan Import
+                    </h5>
+                    <p class="card-text">File harus memiliki header/kolom berikut:</p>
+                    <ul class="small">
+                        <li><strong>supplier</strong> * (wajib — nama supplier)</li>
+                        <li><strong>nama_produk</strong> * (wajib — nama produk)</li>
+                        <li><strong>jumlah</strong> * (wajib — qty pembelian)</li>
+                        <li><strong>harga_satuan</strong> * (wajib — harga beli)</li>
+                        <li><strong>tipe</strong> (opsional — produk/sparepart)</li>
+                        <li><strong>kategori</strong> (opsional)</li>
+                        <li><strong>satuan</strong> (opsional, default: pcs)</li>
+                        <li><strong>gudang</strong> (opsional — nama gudang)</li>
+                        <li><strong>catatan</strong> (opsional)</li>
+                        <li><strong>pajak</strong> (opsional, default: 0)</li>
+                        <li><strong>metode_pembayaran</strong> (opsional)</li>
+                    </ul>
+                    
+                    <hr class="my-3">
+                    
+                    <h6 class="mb-2">Download Template</h6>
+                    <a href="#" onclick="downloadTemplate('csv')" class="btn btn-sm btn-success mb-2 w-100">
+                        <i class="ri-file-excel-line me-1"></i>Download Template CSV
+                    </a>
+                    <a href="#" onclick="downloadTemplate('xlsx')" class="btn btn-sm btn-success w-100">
+                        <i class="ri-file-excel-2-line me-1"></i>Download Template Excel
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock content %}
+
+{% block page_js %}
+{{ block.super }}
+<script>
+function downloadTemplate(format) {
+    // Header sesuai kolom form PO — supplier, gudang, nama_produk, tipe, kategori, satuan, jumlah, harga_satuan, catatan, pajak, metode_pembayaran
+    const header = ['supplier', 'nama_produk', 'tipe', 'kategori', 'satuan', 'jumlah', 'harga_satuan', 'gudang', 'catatan', 'pajak', 'metode_pembayaran'];
+    const sampleData = [
+        ['PT Maju Jaya', 'Indomie Goreng', 'produk', 'Makanan', 'pcs', '100', '2800', 'Gudang Utama', 'Pembelian rutin', '0', 'Cash'],
+        ['PT Maju Jaya', 'Aqua 600ml', 'produk', 'Minuman', 'pcs', '50', '3500', 'Gudang Utama', '', '0', 'Cash'],
+        ['CV Sentosa', 'LCD Screen iPhone', 'sparepart', 'LCD', 'pcs', '10', '150000', 'Gudang Cabang', 'Sparepart baru', '5000', 'Transfer'],
+    ];
+    
+    let blob, filename;
+    
+    if (format === 'csv') {
+        // Generate CSV dengan Excel directive
+        let csvContent = 'sep=,\n';
+        csvContent += header.join(',') + '\n';
+        sampleData.forEach(row => {
+            csvContent += row.join(',') + '\n';
+        });
+        
+        const BOM = '\uFEFF';
+        blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8' });
+        filename = 'template_import_purchase_order.csv';
+    } else {
+        // Generate Excel HTML table
+        let html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">';
+        html += '<head>';
+        html += '<meta charset="utf-8">';
+        html += '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">';
+        html += '<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>';
+        html += '<x:Name>Template Import PO</x:Name>';
+        html += '<x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>';
+        html += '</x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->';
+        html += '</head><body>';
+        html += '<table border="1">';
+        
+        // Header row
+        html += '<thead><tr style="background-color: #696CFF; color: #FFFFFF; font-weight: bold;">';
+        header.forEach(h => html += `<th>${h}</th>`);
+        html += '</tr></thead>';
+        
+        // Data rows
+        html += '<tbody>';
+        sampleData.forEach(row => {
+            html += '<tr>';
+            row.forEach(cell => html += `<td>${cell}</td>`);
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        html += '</body></html>';
+        
+        const BOM = '\uFEFF';
+        blob = new Blob([BOM + html], { type: 'application/vnd.ms-excel;charset=utf-8' });
+        filename = 'template_import_purchase_order.xls';
+    }
+    
+    // Download file
+    if (typeof _downloadBlob === 'function') {
+        _downloadBlob(blob, filename);
+    } else {
+        try {
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            setTimeout(function() { document.body.removeChild(link); URL.revokeObjectURL(url); }, 200);
+        } catch(e) {
+            var reader = new FileReader();
+            reader.onloadend = function() {
+                var downloadUri = reader.result.replace(/^data:[^;]+;/, 'data:application/octet-stream;');
+                window.open(downloadUri, '_blank');
+            };
+            reader.readAsDataURL(blob);
+        }
+    }
+}
+
+// AJAX Import Handler with SweetAlert
+$(document).ready(function() {
+    $('form[enctype="multipart/form-data"]').on('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const submitBtn = $(this).find('button[type="submit"]');
+        const originalText = submitBtn.html();
+       
+        // Nonaktifkan tombol dan tampilkan loading
+        submitBtn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-1"></span>Uploading...');
+        
+        $.ajax({
+            url: '{% url "pembelian:purchase-order-import" %}',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            dataType: 'json',
+            headers: {'X-Requested-With': 'XMLHttpRequest'},
+            success: function(response) {
+                submitBtn.prop('disabled', false).html(originalText);
+                
+                if (response.success) {
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Import Berhasil!',
+                        html: response.message,
+                        confirmButtonText: 'OK',
+                        confirmButtonColor: '#696cff'
+                    }).then(() => {
+                        $('form[enctype="multipart/form-data"]')[0].reset();
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Import Gagal!',
+                        html: response.message,
+                        confirmButtonText: 'OK',
+                        confirmButtonColor: '#696cff'
+                    });
+                }
+            },
+            error: function(xhr, status, error) {
+                submitBtn.prop('disabled', false).html(originalText);
+                
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Terjadi Kesalahan!',
+                    text: 'Gagal mengupload file. Silakan coba lagi.',
+                    confirmButtonText: 'OK',
+                    confirmButtonColor: '#696cff'
+                });
+            }
+        });
+    });
+});
+</script>
+{% endblock page_js %}

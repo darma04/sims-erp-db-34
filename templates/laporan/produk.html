@@ -215,6 +215,7 @@ Tabel: nama, SKU, kategori, harga, stok, nilai.
                             </div>
                         </div>
                     </div>
+                    <small class="text-muted d-block mt-1">Klik untuk memilih kolom</small>
                 </div>
                 <div class="col-md-6"></div>
                 <div class="col-md-3">
@@ -293,7 +294,7 @@ Tabel: nama, SKU, kategori, harga, stok, nilai.
                                     <i class="ri-more-2-line"></i>
                                 </button>
                                 <div class="dropdown-menu">
-                                    <a class="dropdown-item" href="{% url 'laporan:produk-detail' produk.pk %}">
+                                    <a class="dropdown-item" href="{% url 'laporan:produk-detail' produk.id %}">
                                         <i class="ri-eye-line me-2"></i>Lihat Detail
                                     </a>
                                 </div>

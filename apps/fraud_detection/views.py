@@ -63,6 +63,7 @@ import json
 from web_project import TemplateLayout
 # SubModulePermissionMixin — mixin RBAC yang cek izin akses per sub-modul
 from apps.core.mixins import SubModulePermissionMixin
+from apps.core.permissions import has_permission
 # Model Fraud Detection — 3 model utama
 from apps.fraud_detection.models import FraudRule, FraudAlert, CashReconciliation
 # Model Activity Log — untuk menampilkan riwayat aktivitas user
@@ -120,6 +121,18 @@ class FraudDashboardView(SubModulePermissionMixin, TemplateView):
         from apps.pos.models import POSTransactionItem
 
         total_aset = Decimal('0')
+        # Qty sparepart terpakai dari Service Center — kumulatif historis
+        sc_used_by_produk = {}
+        try:
+            from apps.service_center.models import PenggunaanSparepart as SC_SP_Fraud
+            for item in SC_SP_Fraud.objects.values('produk_id').annotate(
+                total_qty=Sum('jumlah')
+            ):
+                if item['produk_id']:
+                    sc_used_by_produk[item['produk_id']] = item['total_qty'] or 0
+        except Exception:
+            pass
+
         for produk in Produk.objects.all():
             # Stok fisik saat ini di semua gudang
             stok_sekarang = Stok.objects.filter(produk=produk).aggregate(
@@ -133,13 +146,15 @@ class FraudDashboardView(SubModulePermissionMixin, TemplateView):
             total_terjual_pos = POSTransactionItem.objects.filter(
                 produk=produk,
                 transaction__status='paid'
-            ).aggregate(total=Sum('jumlah'))['total'] or 0
+            ).aggregate(total=Sum('jumlah_konversi'))['total'] or 0
             # Stok yang keluar via adjustment manual
             total_adj_out = AdjustmentStok.objects.filter(
                 produk=produk, tipe='out'
             ).aggregate(total=Sum('jumlah'))['total'] or 0
             # Total kuantitas seharusnya = semua stok + semua yang keluar
-            qty_total = stok_sekarang + total_terjual_so + total_terjual_pos + total_adj_out
+            # Qty sparepart terpakai di Service Center
+            qty_sc_used = sc_used_by_produk.get(produk.pk, 0)
+            qty_total = stok_sekarang + total_terjual_so + total_terjual_pos + total_adj_out + qty_sc_used
             # Nilai aset = kuantitas × harga beli per unit
             total_aset += Decimal(str(qty_total)) * produk.harga_beli
         context['total_aset_asli'] = total_aset
@@ -151,20 +166,29 @@ class FraudDashboardView(SubModulePermissionMixin, TemplateView):
         from apps.pembelian.models import PurchaseOrder
         from apps.biaya.models import TransaksiBiaya
 
-        # Total pemasukan: POS (lunas) + Sales Order (terkonfirmasi/selesai)
-        total_pemasukan_pos = POSTransaction.objects.filter(
-            status='paid'
-        ).aggregate(total=Sum('total_harga'))['total'] or Decimal('0')
-        total_pemasukan_so = SalesOrder.objects.filter(
-            status__in=['confirmed', 'delivered', 'completed']
-        ).aggregate(total=Sum('total_harga'))['total'] or Decimal('0')
-        total_pemasukan = total_pemasukan_pos + total_pemasukan_so
+        # Total pemasukan: POS (lunas) + Sales Order (terkonfirmasi/selesai) + Service (lunas)
+        # DIPERBAIKI: Menggunakan aggregate_sales_amounts()['net'] agar konsisten
+        # dengan Dashboard utama dan Laporan Keuangan (tanpa PPN, setelah diskon)
+        from apps.core.finance_metrics import aggregate_sales_amounts, aggregate_purchase_amounts
+        total_pemasukan_pos = aggregate_sales_amounts(
+            POSTransaction.objects.filter(status='paid')
+        )['net']
+        total_pemasukan_so = aggregate_sales_amounts(
+            SalesOrder.objects.filter(status__in=['confirmed', 'delivered', 'completed'])
+        )['net']
+        # Service Center: order service yang lunas
+        from apps.service_center.models import OrderService
+        total_pemasukan_service = OrderService.objects.filter(
+            status_bayar='lunas'
+        ).aggregate(total=Sum('biaya_akhir'))['total'] or Decimal('0')
+        total_pemasukan = total_pemasukan_pos + total_pemasukan_so + total_pemasukan_service
         context['total_pemasukan'] = total_pemasukan
+        context['total_pemasukan_service'] = total_pemasukan_service
 
-        # Total pengeluaran: Purchase Order (terkonfirmasi) + Biaya operasional (disetujui)
-        total_pengeluaran_po = PurchaseOrder.objects.filter(
-            status__in=['confirmed', 'received', 'completed']
-        ).aggregate(total=Sum('total_harga'))['total'] or Decimal('0')
+        # Total pengeluaran: Purchase Order (subtotal tanpa PPN) + Biaya operasional (disetujui)
+        total_pengeluaran_po = aggregate_purchase_amounts(
+            PurchaseOrder.objects.filter(status__in=['approved', 'received'])
+        )['subtotal']
         total_pengeluaran_biaya = TransaksiBiaya.objects.filter(
             status='approved'
         ).aggregate(total=Sum('jumlah'))['total'] or Decimal('0')
@@ -202,7 +226,7 @@ class FraudDashboardView(SubModulePermissionMixin, TemplateView):
         from django.utils import timezone
         
         today = timezone.now().date()
-        six_months_ago = today - datetime.timedelta(days=180)
+        six_months_ago = timezone.now() - datetime.timedelta(days=180)
         
         trend_data = FraudAlert.objects.filter(
             created_at__gte=six_months_ago
@@ -373,6 +397,12 @@ class FraudAlertDetailView(SubModulePermissionMixin, TemplateView):
                 elif alert.model_name == 'CashReconciliation':
                     from apps.fraud_detection.models import CashReconciliation
                     context['related_object_cash'] = CashReconciliation.objects.filter(id=alert.object_id).first()
+                elif alert.model_name == 'OrderService':
+                    from apps.service_center.models import OrderService
+                    context['related_object_service'] = OrderService.objects.filter(pk=alert.object_id).first()
+                elif alert.model_name == 'PenggunaanSparepart':
+                    from apps.service_center.models import PenggunaanSparepart
+                    context['related_object_sparepart'] = PenggunaanSparepart.objects.filter(pk=alert.object_id).first()
             except Exception:
                 pass
 
@@ -390,6 +420,9 @@ def fraud_alert_update_status(request, pk):
 
     Return: JsonResponse {success: bool, message: str}
     """
+    if not request.user.is_superuser and not has_permission(request.user, 'update', 'fraud_detection', 'daftar_anomali'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mengubah data anomali.'}, status=403)
+
     try:
         alert = FraudAlert.objects.get(pk=pk)
         new_status = request.POST.get('status')
@@ -705,6 +738,9 @@ def fraud_alert_delete(request, pk):
 
     URL: /fraud/alerts/<pk>/delete/
     """
+    if not request.user.is_superuser and not has_permission(request.user, 'delete', 'fraud_detection', 'daftar_anomali'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk menghapus data anomali.'}, status=403)
+
     from django.db.models import ProtectedError
     try:
         alert = FraudAlert.objects.get(pk=pk)
@@ -741,6 +777,9 @@ def cash_recon_delete(request, pk):
 
     URL: /fraud/cash/<pk>/delete/
     """
+    if not request.user.is_superuser and not has_permission(request.user, 'delete', 'fraud_detection', 'rekonsiliasi_kas'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk menghapus data rekonsiliasi kas.'}, status=403)
+
     from django.db.models import ProtectedError
     try:
         recon = CashReconciliation.objects.get(pk=pk)
@@ -782,6 +821,9 @@ def cash_recon_edit(request, pk):
     URL: /fraud/cash/<pk>/edit/
     Return: JsonResponse {success: bool, message: str}
     """
+    if not request.user.is_superuser and not has_permission(request.user, 'update', 'fraud_detection', 'rekonsiliasi_kas'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mengubah data rekonsiliasi kas.'}, status=403)
+
     try:
         recon = CashReconciliation.objects.get(pk=pk)
         if recon.status == 'reviewed':
@@ -845,6 +887,9 @@ def cash_recon_review(request, pk):
     URL: /fraud/cash/<pk>/review/
     Return: JsonResponse {success: bool, message: str}
     """
+    if not request.user.is_superuser and not has_permission(request.user, 'update', 'fraud_detection', 'rekonsiliasi_kas'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mereview rekonsiliasi kas.'}, status=403)
+
     try:
         recon = CashReconciliation.objects.get(pk=pk)
         if recon.status == 'reviewed':
@@ -878,7 +923,7 @@ def cash_recon_review(request, pk):
             # Buat transaksi biaya otomatis
             kasir_name = recon.kasir.get_full_name() or recon.kasir.username
             biaya = TransaksiBiaya(
-                tanggal=date.today(),
+                tanggal=timezone.now().date(),
                 kategori=kategori,
                 jumlah=abs(recon.discrepancy),
                 deskripsi=f'Selisih kas negatif Rp {abs(recon.discrepancy):,.0f} dari rekonsiliasi kasir {kasir_name} (Shift {recon.shift_start.strftime("%d/%m/%Y %H:%M")})',

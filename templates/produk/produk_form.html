@@ -169,6 +169,15 @@
                             </div>
                         </div>
 
+                        <div class="row">
+                            <div class="col-md-12 mb-3">
+                                <div class="form-floating form-floating-outline">
+                                    {{ form.metode_pembayaran }}
+                                    <label for="{{ form.metode_pembayaran.id_for_label }}">{{ form.metode_pembayaran.label }}</label>
+                                </div>
+                            </div>
+                        </div>
+
                         <div class="mb-3">
                             <div class="form-floating form-floating-outline">
                                 {{ form.deskripsi }}
@@ -187,10 +196,17 @@
                         </div>
 
                         <div class="mb-3">
-                            <div class="form-check">
+                            <div class="form-check form-check-inline">
                                 {{ form.aktif }}
                                 <label class="form-check-label" for="{{ form.aktif.id_for_label }}">
                                     {{ form.aktif.label }}
+                                </label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                {{ form.kena_ppn }}
+                                <label class="form-check-label" for="{{ form.kena_ppn.id_for_label }}">
+                                    {{ form.kena_ppn.label }}
+                                    <i class="ri-question-line text-muted" data-bs-toggle="tooltip" title="Jika dicentang, produk ini akan dikenakan PPN saat transaksi SO dan POS"></i>
                                 </label>
                             </div>
                         </div>

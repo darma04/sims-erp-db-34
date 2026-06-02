@@ -106,6 +106,11 @@ class TransferStok(models.Model):
         verbose_name = "Transfer Stok"         # Nama singular
         verbose_name_plural = "Transfer Stok"  # Nama plural
         ordering = ['-dibuat_pada']            # Terbaru di atas
+        indexes = [
+            models.Index(fields=['status', 'dibuat_pada'], name='inv_trf_status_created_idx'),
+            models.Index(fields=['gudang_asal', 'status'], name='inv_trf_asal_status_idx'),
+            models.Index(fields=['gudang_tujuan', 'status'], name='inv_trf_tujuan_status_idx'),
+        ]
 
     def __str__(self):
         """Representasi: 'TRF/2024/01/0001 - Gudang A → Gudang B'"""
@@ -155,12 +160,20 @@ class TransferStok(models.Model):
                 last_number = int(last_transfer.nomor_transfer.split('/')[-1])
                 new_number = last_number + 1  # Increment
             except (ValueError, IndexError):
-                new_number = 1  # Fallback jika format tidak standar
+                # DIPERBAIKI: fallback aman — hitung jumlah transfer + 1
+                new_number = TransferStok.objects.filter(
+                    nomor_transfer__startswith=prefix
+                ).count() + 1
         else:
             new_number = 1  # Transfer pertama bulan ini
 
         # Format dengan zero-padding 4 digit
-        return f"{prefix}/{new_number:04d}"
+        # Loop untuk memastikan nomor yang dihasilkan benar-benar unik
+        nomor = f"{prefix}/{new_number:04d}"
+        while TransferStok.objects.filter(nomor_transfer=nomor).exists():
+            new_number += 1
+            nomor = f"{prefix}/{new_number:04d}"
+        return nomor
 
     def approve(self, user):
         """
@@ -235,6 +248,20 @@ class TransferStok(models.Model):
                 stok_tujuan.jumlah += item.jumlah  # Tambah sesuai qty transfer
                 stok_tujuan.save()  # Simpan perubahan
 
+                # 2c. Update cabang produk ke gudang dengan stok terbanyak
+                # Jika stok di gudang asal habis, pindahkan cabang produk
+                # ke gudang yang memiliki stok paling banyak
+                produk = item.produk
+                stok_terbanyak = Stok.objects.filter(
+                    produk=produk, jumlah__gt=0
+                ).order_by('-jumlah').first()
+
+                if stok_terbanyak:
+                    # Update cabang ke gudang dengan stok terbanyak
+                    if produk.cabang != stok_terbanyak.gudang:
+                        produk.cabang = stok_terbanyak.gudang
+                        produk.save(update_fields=['cabang'])
+
             # Update status dan catat siapa yang approve
             self.status = 'completed'
             self.disetujui_oleh = user
@@ -283,6 +310,9 @@ class TransferStokItem(models.Model):
         """Konfigurasi metadata model TransferStokItem."""
         verbose_name = "Item Transfer"
         verbose_name_plural = "Item Transfer"
+        indexes = [
+            models.Index(fields=['produk', 'transfer'], name='inv_item_prod_trf_idx'),
+        ]
 
     def __str__(self):
         """Representasi: 'Produk A - 50'"""
@@ -346,6 +376,11 @@ class AdjustmentStok(models.Model):
         verbose_name = "Adjustment Stok"           # Nama singular
         verbose_name_plural = "Adjustment Stok"    # Nama plural
         ordering = ['-dibuat_pada']                # Terbaru di atas
+        indexes = [
+            models.Index(fields=['tanggal', 'tipe'], name='inv_adj_tgl_tipe_idx'),
+            models.Index(fields=['produk', 'gudang'], name='inv_adj_prod_gdg_idx'),
+            models.Index(fields=['gudang', 'tanggal'], name='inv_adj_gdg_tgl_idx'),
+        ]
 
     def __str__(self):
         """Representasi: 'ADJ/2024/01/0001 - Produk ABC'"""
@@ -417,6 +452,16 @@ class AdjustmentStok(models.Model):
 
                 stok.save()  # Simpan perubahan stok ke database
 
+                # Update cabang produk ke gudang dengan stok terbanyak
+                stok_terbanyak = Stok.objects.filter(
+                    produk=self.produk, jumlah__gt=0
+                ).order_by('-jumlah').first()
+
+                if stok_terbanyak:
+                    if self.produk.cabang != stok_terbanyak.gudang:
+                        self.produk.cabang = stok_terbanyak.gudang
+                        self.produk.save(update_fields=['cabang'])
+
         # Log adjustment ke activity_log (opsional, di luar atomic agar tidak rollback)
         if is_new:
             try:
@@ -458,9 +503,17 @@ class AdjustmentStok(models.Model):
                 last_number = int(last_adj.nomor_adjustment.split('/')[-1])
                 new_number = last_number + 1  # Increment
             except (ValueError, IndexError):
-                new_number = 1  # Fallback jika format tidak standar
+                # DIPERBAIKI: fallback aman — hitung jumlah adjustment + 1
+                new_number = AdjustmentStok.objects.filter(
+                    nomor_adjustment__startswith=prefix
+                ).count() + 1
         else:
             new_number = 1  # Adjustment pertama bulan ini
 
         # Format dengan zero-padding 4 digit
-        return f"{prefix}/{new_number:04d}"
+        # Loop untuk memastikan nomor yang dihasilkan benar-benar unik
+        nomor = f"{prefix}/{new_number:04d}"
+        while AdjustmentStok.objects.filter(nomor_adjustment=nomor).exists():
+            new_number += 1
+            nomor = f"{prefix}/{new_number:04d}"
+        return nomor

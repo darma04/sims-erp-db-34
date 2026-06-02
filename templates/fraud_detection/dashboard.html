@@ -163,8 +163,8 @@ FRAUD DETECTION DASHBOARD - Grafik gelombang (ApexCharts Area) + Doughnut
                         </div>
                         <div class="flex-grow-1">
                             <span class="d-block text-muted small">Total Pemasukan</span>
-                            <h5 class="mb-0 fw-bold text-success">Rp {{ total_pemasukan|floatformat:0 }}</h5>
-                            <small class="text-muted">POS + Sales Order</small>
+                            <h5 class="mb-0 fw-bold text-success" style="cursor:help" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true" title="<b>Alur Data:</b><br>POS paid + Sales Order confirmed/delivered/completed.<br>SO dihitung dari subtotal setelah diskon + ongkir; POS dari subtotal setelah diskon; PPN tidak dihitung sebagai pendapatan.">Rp {{ total_pemasukan|floatformat:0 }}</h5>
+                            <small class="text-muted">Net tanpa PPN</small>
                         </div>
                     </div>
                 </div>
@@ -187,8 +187,8 @@ FRAUD DETECTION DASHBOARD - Grafik gelombang (ApexCharts Area) + Doughnut
                         </div>
                         <div class="flex-grow-1">
                             <span class="d-block text-muted small">Total Pengeluaran</span>
-                            <h5 class="mb-0 fw-bold text-danger">Rp {{ total_pengeluaran|floatformat:0 }}</h5>
-                            <small class="text-muted">PO + Biaya</small>
+                            <h5 class="mb-0 fw-bold text-danger" style="cursor:help" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true" title="<b>Alur Data:</b><br>Purchase Order approved/received + Biaya approved.<br>PO dihitung dari DPP/subtotal termasuk ongkir; PPN Masukan dipisahkan dari beban operasional.">Rp {{ total_pengeluaran|floatformat:0 }}</h5>
+                            <small class="text-muted">DPP + biaya</small>
                         </div>
                     </div>
                 </div>
@@ -213,7 +213,7 @@ FRAUD DETECTION DASHBOARD - Grafik gelombang (ApexCharts Area) + Doughnut
                         <div class="flex-grow-1">
                             <span class="d-block text-muted small">Selisih Keuangan</span>
                             <h5
-                                class="mb-0 fw-bold {% if selisih_keuangan >= 0 %}text-info{% else %}text-warning{% endif %}">
+                                class="mb-0 fw-bold {% if selisih_keuangan >= 0 %}text-info{% else %}text-warning{% endif %}" style="cursor:help" data-bs-toggle="tooltip" data-bs-placement="bottom" data-bs-html="true" title="<b>Rumus:</b><br>Total Pemasukan - Total Pengeluaran.<br>Diskon sudah mengurangi pemasukan, ongkir masuk sesuai sumber SO/PO, dan PPN dipisahkan dari laba/rugi operasional.">
                                 Rp {{ selisih_keuangan|floatformat:0 }}
                             </h5>
                             <small class="text-muted">Pemasukan - Pengeluaran</small>
@@ -412,6 +412,9 @@ FRAUD DETECTION DASHBOARD - Grafik gelombang (ApexCharts Area) + Doughnut
 {{ block.super }}
 <script>
     document.addEventListener('DOMContentLoaded', function () {
+        [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]')).forEach(function (el) {
+            new bootstrap.Tooltip(el);
+        });
         // ═══ DETEKSI DARK MODE ═══
         var isDark = typeof isDarkStyle !== 'undefined' ? isDarkStyle :
             (document.documentElement.classList.contains('dark-style') ||

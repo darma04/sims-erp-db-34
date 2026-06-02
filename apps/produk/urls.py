@@ -43,6 +43,7 @@ urlpatterns = [
     
     # Satuan URLs
     path('satuan/', views.SatuanListView.as_view(), name='satuan'),
+    path('satuan/seed-default/', views.SatuanSeedDefaultView.as_view(), name='satuan_seed_default'),
     # URL: /produk/satuan/add/ — satuan_add
     path('satuan/add/', views.SatuanCreateView.as_view(), name='satuan_add'),
     # URL: /produk/satuan/<int:pk>/edit/ — satuan_edit
@@ -66,4 +67,15 @@ urlpatterns = [
 
     # API Konversi Satuan
     path('api/konversi-satuan/<int:produk_id>/', views.api_konversi_satuan, name='api_konversi_satuan'),
+
+    # Sparepart URLs
+    path('sparepart/', views.SparepartListView.as_view(), name='sparepart_list'),
+    # URL: /produk/sparepart/import/ — sparepart_import
+    path('sparepart/import/', views.SparepartImportView.as_view(), name='sparepart_import'),
+    # URL: /produk/sparepart/tambah/ — sparepart_tambah
+    path('sparepart/tambah/', views.SparepartCreateView.as_view(), name='sparepart_tambah'),
+    # URL: /produk/sparepart/<int:pk>/edit/ — sparepart_edit
+    path('sparepart/<int:pk>/edit/', views.SparepartUpdateView.as_view(), name='sparepart_edit'),
+    # URL: /produk/sparepart/<int:pk>/delete/ — sparepart_delete
+    path('sparepart/<int:pk>/delete/', views.SparepartDeleteView.as_view(), name='sparepart_delete'),
 ]

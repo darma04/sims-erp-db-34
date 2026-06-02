@@ -22,6 +22,7 @@
 from django import forms
 # Import dari modul internal proyek
 from apps.hr.models import Departemen, Jabatan, Karyawan, Absensi, Penggajian, FotoWajah, PengaturanAbsensi
+from apps.pos.models import MetodePembayaran
 
 
 class DepartemenForm(forms.ModelForm):
@@ -67,7 +68,7 @@ class KaryawanForm(forms.ModelForm):
         fields = [
             'nik', 'nama', 'email', 'telepon', 'alamat',
             'tempat_lahir', 'tanggal_lahir', 'jenis_kelamin',
-            'foto', 'jabatan', 'departemen', 'tanggal_masuk',
+            'foto', 'jabatan', 'departemen', 'cabang', 'tanggal_masuk',
             'gaji_pokok', 'status', 'aktif'
         ]
         # Widget HTML untuk setiap field form (class CSS, placeholder, dll)
@@ -83,6 +84,7 @@ class KaryawanForm(forms.ModelForm):
             'foto': forms.FileInput(attrs={'class': 'form-control'}),
             'jabatan': forms.Select(attrs={'class': 'form-select'}),
             'departemen': forms.Select(attrs={'class': 'form-select'}),
+            'cabang': forms.Select(attrs={'class': 'form-select'}),
             'tanggal_masuk': forms.DateInput(attrs={'class': 'form-control', 'type': 'date'}),
             'gaji_pokok': forms.NumberInput(attrs={'class': 'form-control', 'placeholder': '0'}),
             'status': forms.Select(attrs={'class': 'form-select'}),
@@ -114,6 +116,7 @@ class PenggajianForm(forms.ModelForm):
         model = Penggajian
         fields = [
             'karyawan', 'periode_bulan', 'periode_tahun',
+            'metode_pembayaran',
             'gaji_pokok', 'tunjangan_jabatan', 'tunjangan_makan',
             'tunjangan_transport', 'tunjangan_lainnya', 'lembur', 'bonus',
             'potongan_bpjs_kesehatan', 'potongan_bpjs_ketenagakerjaan',
@@ -128,6 +131,7 @@ class PenggajianForm(forms.ModelForm):
                 (9, 'September'), (10, 'Oktober'), (11, 'November'), (12, 'Desember')
             ]),
             'periode_tahun': forms.NumberInput(attrs={'class': 'form-control', 'placeholder': '2026'}),
+            'metode_pembayaran': forms.Select(attrs={'class': 'form-select'}),
             'gaji_pokok': forms.NumberInput(attrs={'class': 'form-control'}),
             'tunjangan_jabatan': forms.NumberInput(attrs={'class': 'form-control'}),
             'tunjangan_makan': forms.NumberInput(attrs={'class': 'form-control'}),
@@ -141,6 +145,12 @@ class PenggajianForm(forms.ModelForm):
             'potongan_lainnya': forms.NumberInput(attrs={'class': 'form-control'}),
             'catatan': forms.Textarea(attrs={'class': 'form-control', 'rows': 2}),
         }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['metode_pembayaran'].queryset = MetodePembayaran.objects.filter(aktif=True)
+        self.fields['metode_pembayaran'].required = False
+        self.fields['metode_pembayaran'].empty_label = 'Pilih Metode Pembayaran'
 
 
 class FotoWajahForm(forms.ModelForm):
@@ -158,6 +168,12 @@ class FotoWajahForm(forms.ModelForm):
 
 class GeneratePenggajianForm(forms.Form):
     """Form untuk generate penggajian bulanan"""
+    metode_pembayaran = forms.ModelChoiceField(
+        queryset=MetodePembayaran.objects.none(),
+        required=False,
+        widget=forms.Select(attrs={'class': 'form-select'}),
+        label='Metode Pembayaran'
+    )
     periode_bulan = forms.ChoiceField(
         choices=[
             (1, 'Januari'), (2, 'Februari'), (3, 'Maret'), (4, 'April'),
@@ -177,6 +193,11 @@ class GeneratePenggajianForm(forms.Form):
         initial=0,
         widget=forms.NumberInput(attrs={'class': 'form-control', 'placeholder': '300000'})
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['metode_pembayaran'].queryset = MetodePembayaran.objects.filter(aktif=True)
+        self.fields['metode_pembayaran'].empty_label = 'Pilih Metode Pembayaran'
 
 
 class PengaturanAbsensiForm(forms.ModelForm):
@@ -204,7 +225,7 @@ class PengaturanAbsensiForm(forms.ModelForm):
         """Konfigurasi form pengaturan absensi — jam kerja, lokasi GPS, dan fitur wajib."""
         model = PengaturanAbsensi
         fields = [
-            'nama', 'aktif',
+            'nama', 'aktif', 'cabang',
             'jam_masuk', 'jam_pulang', 'toleransi_terlambat',
             'zona_waktu', 'nama_lokasi', 'alamat_lokasi',
             'latitude', 'longitude', 'radius_lokasi',
@@ -215,6 +236,7 @@ class PengaturanAbsensiForm(forms.ModelForm):
         widgets = {
             'nama': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'Nama Pengaturan'}),
             'aktif': forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+            'cabang': forms.Select(attrs={'class': 'form-select'}),
             'jam_masuk': forms.TimeInput(attrs={'class': 'form-control', 'type': 'time'}),
             'jam_pulang': forms.TimeInput(attrs={'class': 'form-control', 'type': 'time'}),
             'toleransi_terlambat': forms.NumberInput(attrs={'class': 'form-control', 'placeholder': '15'}),

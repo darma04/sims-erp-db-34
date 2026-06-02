@@ -38,11 +38,16 @@ Fitur: export Excel & PDF, filter.
             </h4>
             <p class="text-muted mb-0">Daftar pesanan pembelian dari supplier</p>
         </div>
-        {% if can_create.pembelian %}
-        <a href="{% url 'pembelian:purchase-order-add' %}" class="btn btn-primary">
-            <i class="ri-add-line me-1"></i>Buat PO Baru
-        </a>
-        {% endif %}
+        <div class="d-flex gap-2">
+            <a href="{% url 'pembelian:purchase-order-import' %}" class="btn btn-success">
+                <i class="ri-upload-2-line me-1"></i>Import PO
+            </a>
+            {% if can_create.pembelian %}
+            <a href="{% url 'pembelian:purchase-order-add' %}" class="btn btn-primary">
+                <i class="ri-add-line me-1"></i>Buat PO Baru
+            </a>
+            {% endif %}
+        </div>
     </div>
 
     <!-- Filter Card -->
@@ -213,7 +218,12 @@ Fitur: export Excel & PDF, filter.
                             {% endif %}
                         </td>
                         <td><span class="badge bg-label-info">{{ po.gudang.nama }}</span></td>
-                        <td class="fw-bold">{{ po.total_harga|rupiah }}</td>
+                        <td class="fw-bold">
+                            {{ po.total_harga|rupiah }}
+                            {% if po.biaya_pengiriman > 0 %}
+                            <br><small class="text-muted">Ongkir: {{ po.biaya_pengiriman|rupiah }}</small>
+                            {% endif %}
+                        </td>
                         <td>
                             {% if po.status == 'draft' %}
                             <span class="badge bg-label-secondary">Draft</span>

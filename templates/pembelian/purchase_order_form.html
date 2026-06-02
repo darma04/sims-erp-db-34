@@ -84,7 +84,7 @@
                                 <div class="mb-3">
                                     <label class="form-label">{{ form.metode_pembayaran.label }}</label>
                                     {{ form.metode_pembayaran }}
-                                    <div class="form-text">Metode pembayaran untuk PO ini (opsional)</div>
+                                    <div class="form-text">Kosong/TEMPO akan membentuk hutang sampai dibayar</div>
                                 </div>
 
                                 <div class="mb-3">
@@ -97,6 +97,14 @@
                                     <div class="input-group">
                                         <span class="input-group-text">Rp</span>
                                         {{ form.pajak }}
+                                    </div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="form-label">{{ form.biaya_pengiriman.label }}</label>
+                                    <div class="input-group">
+                                        <span class="input-group-text">Rp</span>
+                                        {{ form.biaya_pengiriman }}
                                     </div>
                                 </div>
 
@@ -193,6 +201,10 @@
                                             <span class="text-muted">Subtotal:</span>
                                             <span class="fw-medium" id="subtotal">Rp 0</span>
                                         </div>
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="text-muted">Ongkir:</span>
+                                            <span class="fw-medium" id="shipping-amount">Rp 0</span>
+                                        </div>
                                         <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
                                             <span class="text-muted">Pajak:</span>
                                             <span class="fw-medium" id="tax-amount">Rp 0</span>
@@ -257,15 +269,17 @@
 
             const taxInput = $('[name="pajak"]').val() || 0;
             const tax = parseFloat(taxInput);
-            const total = subtotal + tax;
+            const ongkir = parseFloat($('[name="biaya_pengiriman"]').val()) || 0;
+            const total = subtotal + ongkir + tax;
 
             $('#subtotal').text(formatRupiah(subtotal));
+            $('#shipping-amount').text(formatRupiah(ongkir));
             $('#tax-amount').text(formatRupiah(tax));
             $('#total').text(formatRupiah(total));
         }
 
         // Update total saat input berubah
-        $(document).on('input', '[name$="-jumlah"], [name$="-harga_satuan"], [name="pajak"]', function () {
+        $(document).on('input', '[name$="-jumlah"], [name$="-harga_satuan"], [name="pajak"], [name="biaya_pengiriman"]', function () {
             calculateTotals();
         });
 

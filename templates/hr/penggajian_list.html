@@ -35,6 +35,9 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
         </div>
         {% if can_create.hr %}
         <div class="d-flex gap-2">
+            <a href="{% url 'hr:penggajian-import' %}" class="btn btn-warning">
+                <i class="ri-upload-2-line me-1"></i>Import Penggajian
+            </a>
             <a href="{% url 'hr:penggajian-generate' %}" class="btn btn-success">
                 <i class="ri-file-add-line me-1"></i>Generate Slip Gaji
             </a>
@@ -157,8 +160,70 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
                         <option value="dibayar">Dibayar</option>
                     </select>
                 </div>
+            </div>
+            <!-- Baris kedua: Pilih Kolom (kiri) dan Tombol Filter (kanan) -->
+            <div class="row g-3 mt-2 align-items-end">
                 <div class="col-md-3">
-                    <label class="form-label">&nbsp;</label>
+                    <label class="form-label">Pilih Kolom</label>
+                    <div class="dropdown">
+                        <button class="btn btn-label-secondary dropdown-toggle waves-effect w-100" type="button"
+                            id="columnFilterDropdown" data-bs-toggle="dropdown" data-bs-auto-close="outside"
+                            aria-expanded="false">
+                            <i class="ri-layout-column-line me-1"></i>
+                            Pilih Kolom Yang Ditampilkan
+                        </button>
+                        <div class="dropdown-menu p-3" aria-labelledby="columnFilterDropdown" style="min-width: 280px;">
+                            <h6 class="dropdown-header px-0 mb-2">Kolom Tabel</h6>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="0"
+                                    id="col-periode" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-periode">Periode</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="1"
+                                    id="col-karyawan" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-karyawan">Karyawan</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="2"
+                                    id="col-gajipokok" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-gajipokok">Gaji Pokok</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="3"
+                                    id="col-tunjangan" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-tunjangan">Tunjangan</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="4"
+                                    id="col-potongan" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-potongan">Potongan</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="5"
+                                    id="col-gajibersih" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-gajibersih">Gaji Bersih</label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input column-checkbox" type="checkbox" value="6"
+                                    id="col-status" checked onchange="toggleColumns()">
+                                <label class="form-check-label" for="col-status">Status</label>
+                            </div>
+                            <div class="dropdown-divider my-2"></div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-sm btn-primary flex-fill" onclick="selectAllColumns()">
+                                    <i class="ri-checkbox-multiple-line ri-16px"></i> Semua
+                                </button>
+                                <button class="btn btn-sm btn-label-secondary flex-fill" onclick="deselectAllColumns()">
+                                    <i class="ri-checkbox-blank-line ri-16px"></i> Kosongkan
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <small class="text-muted d-block mt-1">Klik untuk memilih kolom</small>
+                </div>
+                <div class="col-md-6"></div>
+                <div class="col-md-3">
                     <div class="d-grid gap-2">
                         <button class="btn btn-primary" onclick="applyFilter()">
                             <i class="ri-filter-3-line me-1"></i>Terapkan Filter
@@ -169,68 +234,6 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
                     </div>
                 </div>
             </div>
-        </div>
-    </div>
-
-    <!-- Pilih Kolom Card -->
-    <div class="card mb-4">
-        <div class="card-body">
-            <label class="form-label">Pilih Kolom Yang Ditampilkan</label>
-            <div class="dropdown" id="columnFilterDropdown">
-                <button class="btn btn-label-secondary dropdown-toggle w-100 text-start" type="button"
-                    data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
-                    <i class="ri-layout-column-line me-1"></i>Pilih Kolom <span class="caret"></span>
-                </button>
-                <div class="dropdown-menu p-3" style="min-width: 200px;">
-                    <div class="mb-2"><strong>Kolom Tabel</strong></div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="0" id="col-periode"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-periode">Periode</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="1" id="col-karyawan"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-karyawan">Karyawan</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="2" id="col-gajipokok"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-gajipokok">Gaji Pokok</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="3" id="col-tunjangan"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-tunjangan">Tunjangan</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="4" id="col-potongan"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-potongan">Potongan</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="5" id="col-gajibersih"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-gajibersih">Gaji Bersih</label>
-                    </div>
-                    <div class="form-check mb-2">
-                        <input class="form-check-input column-checkbox" type="checkbox" value="6" id="col-status"
-                            checked onchange="toggleColumns()">
-                        <label class="form-check-label" for="col-status">Status</label>
-                    </div>
-                    <hr class="my-2">
-                    <div class="d-flex gap-2">
-                        <button type="button" class="btn btn-sm btn-primary flex-grow-1" onclick="selectAllColumns()">
-                            <i class="ri-checkbox-multiple-line me-1"></i>Semua
-                        </button>
-                        <button type="button" class="btn btn-sm btn-label-secondary flex-grow-1"
-                            onclick="deselectAllColumns()">
-                            <i class="ri-checkbox-blank-line me-1"></i>Kosongkan
-                        </button>
-                    </div>
-                </div>
-            </div>
-            <small class="text-muted">Klik untuk memilih kolom</small>
         </div>
     </div>
 
@@ -269,7 +272,7 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
                         </td>
                         <td>
                             <div class="d-flex align-items-center">
-                                <div class="avatar avatar-sm me-2 flex-shrink-0 bg-label-primary">
+                                <div class="avatar avatar-sm me-2 flex-shrink-0">
                                     <span class="avatar-initial rounded-circle">{{ slip.karyawan.nama|slice:":2"|upper }}</span>
                                 </div>
                                 <div>
@@ -308,6 +311,12 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
                                     <a class="dropdown-item" href="{% url 'hr:penggajian-edit' slip.pk %}">
                                         <i class="ri-edit-line me-2"></i>Edit
                                     </a>
+                                    {% if slip.status != 'dibayar' %}
+                                    <a class="dropdown-item text-success" href="javascript:void(0);"
+                                        onclick="openStatusModal({{ slip.pk }}, '{{ slip.status }}', '{{ slip.karyawan.nama|escapejs }} - {{ slip.periode }}')">
+                                        <i class="ri-exchange-line me-2"></i>Update Status
+                                    </a>
+                                    {% endif %}
                                     {% endif %}
                                     {% if can_edit.hr and can_delete.hr %}
                                     <div class="dropdown-divider"></div>
@@ -391,6 +400,47 @@ Tabel: periode, karyawan, gaji pokok, tunjangan, potongan, total.
             </div>
         </div>
     </div>
+
+    <!-- ===== MODAL UPDATE STATUS PENGGAJIAN ===== -->
+    <div class="modal fade" id="statusModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary align-items-center py-3">
+                    <h5 class="modal-title text-white mb-0">
+                        <i class="ri-exchange-line me-2"></i>Update Status Slip Gaji
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body py-4">
+                    <p class="mb-3">Slip: <strong id="statusSlipName"></strong></p>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Status Saat Ini</label>
+                        <div id="statusCurrentBadge"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Ubah Status Ke <span class="text-danger">*</span></label>
+                        <select class="form-select" id="statusSelectNew" name="status">
+                            <option value="draft">Draft</option>
+                            <option value="diproses">Diproses</option>
+                            <option value="dibayar">Dibayar</option>
+                            <option value="batal">Batal</option>
+                        </select>
+                    </div>
+                    <div class="alert alert-info d-flex align-items-start py-2 mb-0" id="statusInfoBox">
+                        <i class="ri-information-line me-2 mt-1 flex-shrink-0"></i>
+                        <small id="statusInfoText">Pilih status untuk melihat informasi.</small>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-label-secondary" data-bs-dismiss="modal">Batal</button>
+                    <button type="button" class="btn btn-primary" id="btnSimpanStatus">
+                        <i class="ri-save-line me-1"></i>Simpan Status
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
 {% csrf_token %}
 {% endblock content %}
@@ -812,6 +862,94 @@ $('#confirmDeleteBtn').on('click', function() {
             $('#deleteModal .modal-body').append('<div class="delete-error-msg alert alert-danger d-flex align-items-start mt-3 mb-0" role="alert"><i class="ri-error-warning-line me-2 fs-5"></i><div>' + msg + '</div></div>');
             btn.prop('disabled', false).html(originalText);
         }
+    });
+});
+</script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// UPDATE STATUS SLIP GAJI — AJAX MODAL
+// ═══════════════════════════════════════════════════════════════
+
+var statusSlipId = null;
+
+var STATUS_INFO = {
+    'draft'   : { badge: 'secondary', info: 'Status awal. Slip belum diproses.' },
+    'diproses': { badge: 'warning',   info: 'Slip sedang diproses oleh tim HR/keuangan.' },
+    'dibayar' : { badge: 'success',   info: 'Slip telah dibayar. Jurnal akuntansi akan dibuat otomatis.' },
+    'batal'   : { badge: 'danger',    info: 'Slip dibatalkan dan tidak akan diproses.' }
+};
+
+function openStatusModal(slipId, currentStatus, slipName) {
+    statusSlipId = slipId;
+    document.getElementById('statusSlipName').textContent = slipName;
+
+    // Set badge status saat ini
+    var info = STATUS_INFO[currentStatus] || { badge: 'secondary', info: '-' };
+    document.getElementById('statusCurrentBadge').innerHTML =
+        '<span class="badge bg-label-' + info.badge + '">' + (currentStatus.charAt(0).toUpperCase() + currentStatus.slice(1)) + '</span>';
+
+    // Pre-select next logical status
+    var nextStatus = { 'draft': 'diproses', 'diproses': 'dibayar' }[currentStatus] || 'diproses';
+    var sel = document.getElementById('statusSelectNew');
+    sel.value = nextStatus;
+    updateStatusInfo(nextStatus);
+
+    new bootstrap.Modal(document.getElementById('statusModal')).show();
+}
+
+function updateStatusInfo(status) {
+    var info = STATUS_INFO[status] || { badge: 'secondary', info: '' };
+    document.getElementById('statusInfoText').textContent = info.info;
+    var box = document.getElementById('statusInfoBox');
+    box.className = 'alert d-flex align-items-start py-2 mb-0 alert-' +
+        ({ 'success': 'success', 'danger': 'danger', 'warning': 'warning' }[info.badge] || 'info');
+}
+
+document.getElementById('statusSelectNew').addEventListener('change', function() {
+    updateStatusInfo(this.value);
+});
+
+document.getElementById('btnSimpanStatus').addEventListener('click', function() {
+    if (!statusSlipId) return;
+    var btn = this;
+    var newStatus = document.getElementById('statusSelectNew').value;
+    var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Menyimpan...';
+
+    var formData = new FormData();
+    formData.append('status', newStatus);
+    formData.append('csrfmiddlewaretoken', csrfToken);
+
+    fetch('/hr/penggajian/' + statusSlipId + '/update-status-ajax/', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrfToken },
+        body: formData
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.success) {
+            bootstrap.Modal.getInstance(document.getElementById('statusModal')).hide();
+            // Tampilkan toast sukses
+            var toastHtml = '<div class="bs-toast toast align-items-center text-bg-success border-0 show" style="position:fixed;top:20px;right:20px;z-index:9999" role="alert">' +
+                '<div class="d-flex"><div class="toast-body"><i class="ri-check-circle-line me-2"></i>' + data.message + '</div>' +
+                '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>';
+            var toastEl = document.createElement('div');
+            toastEl.innerHTML = toastHtml;
+            document.body.appendChild(toastEl);
+            setTimeout(function() { location.reload(); }, 1200);
+        } else {
+            alert(data.message || 'Gagal mengubah status.');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="ri-save-line me-1"></i>Simpan Status';
+        }
+    })
+    .catch(function() {
+        alert('Terjadi kesalahan pada server.');
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-save-line me-1"></i>Simpan Status';
     });
 });
 </script>

@@ -46,6 +46,7 @@ from django.contrib import messages
 from django.utils.decorators import method_decorator
 # Import dari framework Django
 from django.db import transaction  # Atomic transaction untuk operasi stok
+from django.views.decorators.http import require_http_methods
 from web_project import TemplateLayout
 # Import dari modul internal proyek
 from apps.pembelian.models import Supplier, PurchaseOrder, PurchaseOrderItem
@@ -129,7 +130,7 @@ class SupplierUpdateView(UpdatePermissionMixin, UpdateView):
 class SupplierDeleteView(DeletePermissionMixin, DeleteView):
     """
     Hapus supplier — return JSON untuk AJAX.
-    ⚠ Gagal jika supplier masih punya PO (FK PROTECT)
+    Catatan: Gagal jika supplier masih punya PO (FK PROTECT)
     """
     model = Supplier
     # URL redirect setelah operasi berhasil
@@ -178,6 +179,12 @@ class PurchaseOrderListView(ReadPermissionMixin, ListView):
     # Modul permission yang dicek: 'pembelian'
     permission_module = 'pembelian'
     permission_sub_module = 'purchase_order'
+
+    def get_queryset(self):
+        """Optimasi query list PO agar relasi utama sudah ikut diambil."""
+        return super().get_queryset().select_related(
+            'supplier', 'gudang', 'metode_pembayaran', 'dibuat_oleh', 'disetujui_oleh'
+        ).prefetch_related('items__produk')
     
     def get_context_data(self, **kwargs):
         """Menambahkan data konteks tambahan ke template."""
@@ -219,6 +226,11 @@ class PurchaseOrderCreateView(CreatePermissionMixin, CreateView):
     # Modul permission yang dicek: 'pembelian'
     permission_module = 'pembelian'
     permission_sub_module = 'purchase_order'
+
+    def get_queryset(self):
+        return super().get_queryset().select_related(
+            'supplier', 'gudang', 'metode_pembayaran', 'dibuat_oleh', 'disetujui_oleh'
+        ).prefetch_related('items__produk')
     
     def get_context_data(self, **kwargs):
         """Menambahkan data konteks tambahan ke template."""
@@ -233,6 +245,9 @@ class PurchaseOrderCreateView(CreatePermissionMixin, CreateView):
         # Query database — ambil semua data context['satuan_list']
         # Data konteks: satuan_list — untuk ditampilkan di template
         context['satuan_list'] = Satuan.objects.all()
+        # Data konteks: tipe_choices — untuk dropdown tipe Produk/Sparepart
+        from apps.produk.models import Produk
+        context['tipe_choices'] = Produk.TIPE_CHOICES
         return context
     
     def form_valid(self, form):
@@ -241,134 +256,149 @@ class PurchaseOrderCreateView(CreatePermissionMixin, CreateView):
         Items diambil dari POST data manual (bukan formset standar).
         """
         from apps.produk.models import Produk, Kategori, Satuan
-        from decimal import Decimal
+        from decimal import Decimal, InvalidOperation
         import random
         
-        # Simpan PO (tanpa items dulu)
-        po = form.save(commit=False)
-        po.dibuat_oleh = self.request.user
-        
-        if not po.nomor_po:
-            po.nomor_po = po.generate_nomor()
-        
-        # Seluruh proses dalam atomic transaction
-        # untuk mencegah data korup saat concurrent PO creation + stok update
-        po.save()
+        # DIPERBAIKI QA-P1: Seluruh proses dalam atomic transaction
+        # agar tidak ada produk/stok orphan jika error di tengah loop
+        with transaction.atomic():
+            # Simpan PO (tanpa items dulu)
+            po = form.save(commit=False)
+            po.dibuat_oleh = self.request.user
             
-        # Proses setiap item dari POST data
-        items_created = 0
-        i = 0
-        while True:
-            nama_produk = self.request.POST.get(f'items-{i}-nama_produk')
-            if nama_produk is None:
-                break
-                
-            # Skip baris kosong
-            if not nama_produk.strip():
-                i += 1
-                continue
-                
-            jumlah = self.request.POST.get(f'items-{i}-jumlah', '0')
-            harga_satuan = self.request.POST.get(f'items-{i}-harga_satuan', '0')
-            kategori_id = self.request.POST.get(f'items-{i}-kategori')
-            satuan_id = self.request.POST.get(f'items-{i}-satuan')
-            catatan = self.request.POST.get(f'items-{i}-catatan', '')
-                
-            # Blok penanganan error — coba jalankan kode di bawah
-            try:
-                jumlah = Decimal(jumlah) if jumlah else Decimal('0')
-                harga_satuan = Decimal(harga_satuan) if harga_satuan else Decimal('0')
-            except (ValueError, InvalidOperation):
-                i += 1
-                continue
-                
-            if jumlah <= 0 or harga_satuan <= 0:
-                i += 1
-                continue
-                
-            # Dapatkan kategori dan satuan (fallback ke yang pertama jika tidak valid)
-            kategori = None
-            satuan = None
-                
-            if kategori_id:
-                try:
-                    kategori = Kategori.objects.get(pk=kategori_id)
-                except Kategori.DoesNotExist:
-                    pass
-            if not kategori:
-                kategori = Kategori.objects.first()
-                
-            if satuan_id:
-                try:
-                    satuan = Satuan.objects.get(pk=satuan_id)
-                except Satuan.DoesNotExist:
-                    pass
-            if not satuan:
-                satuan = Satuan.objects.first()
-                
-            # Generate SKU unik (PRD-xxxxxxxxxx)
-            sku = f"PRD-{random.randint(1000000000, 9999999999)}"
-            while Produk.objects.filter(sku=sku).exists():
-                sku = f"PRD-{random.randint(1000000000, 9999999999)}"
-                
-            # Buat Produk baru
-            produk = Produk.objects.create(
-                sku=sku,
-                nama=nama_produk.strip(),
-                kategori=kategori,
-                satuan=satuan,
-                harga_beli=harga_satuan,
-                harga_jual=harga_satuan * Decimal('1.2'),  # Markup 20%
-                aktif=True,
-                dibuat_oleh=self.request.user
-            )
-                
-            # Buat PurchaseOrderItem
-            PurchaseOrderItem.objects.create(
-                purchase_order=po,
-                produk=produk,
-                jumlah=jumlah,
-                harga_satuan=harga_satuan,
-                catatan=catatan
-            )
-                
-            # Update stok langsung di gudang tujuan (dengan lock)
-            from apps.produk.models import Stok
-            stok, created = Stok.objects.select_for_update().get_or_create(
-                produk=produk,
-                gudang=po.gudang,
-                defaults={'jumlah': 0}
-            )
-            stok.jumlah += jumlah
-            stok.save()
-                
-            items_created += 1
-            i += 1
+            if not po.nomor_po:
+                po.nomor_po = po.generate_nomor()
             
-        # Set status langsung ke received
-        po.status = 'received'
-        po.calculate_total()
-        po.save()
+            po.save()
+                
+            # Proses setiap item dari POST data
+            items_created = 0
+            i = 0
+            while True:
+                nama_produk = self.request.POST.get(f'items-{i}-nama_produk')
+                if nama_produk is None:
+                    break
+                    
+                # Skip baris kosong
+                if not nama_produk.strip():
+                    i += 1
+                    continue
+                    
+                jumlah = self.request.POST.get(f'items-{i}-jumlah', '0')
+                harga_satuan = self.request.POST.get(f'items-{i}-harga_satuan', '0')
+                kategori_id = self.request.POST.get(f'items-{i}-kategori')
+                satuan_id = self.request.POST.get(f'items-{i}-satuan')
+                catatan = self.request.POST.get(f'items-{i}-catatan', '')
+                tipe_item = self.request.POST.get(f'items-{i}-tipe', 'produk')  # Tipe: produk atau sparepart
+                    
+                # Blok penanganan error — coba jalankan kode di bawah
+                try:
+                    jumlah = Decimal(jumlah) if jumlah else Decimal('0')
+                    harga_satuan = Decimal(harga_satuan) if harga_satuan else Decimal('0')
+                except (ValueError, InvalidOperation):
+                    i += 1
+                    continue
+                    
+                if jumlah <= 0 or harga_satuan <= 0:
+                    i += 1
+                    continue
+                    
+                # Dapatkan kategori dan satuan (fallback ke yang pertama jika tidak valid)
+                kategori = None
+                satuan = None
+                    
+                if kategori_id:
+                    try:
+                        kategori = Kategori.objects.get(pk=kategori_id)
+                    except Kategori.DoesNotExist:
+                        pass
+                if not kategori:
+                    kategori = Kategori.objects.first()
+                    
+                if satuan_id:
+                    try:
+                        satuan = Satuan.objects.get(pk=satuan_id)
+                    except Satuan.DoesNotExist:
+                        pass
+                if not satuan:
+                    satuan = Satuan.objects.first()
+                    
+                # Generate SKU unik berdasarkan tipe (SPR untuk sparepart, PRD untuk produk)
+                sku_prefix = 'SPR' if tipe_item == 'sparepart' else 'PRD'
+                sku = f"{sku_prefix}-{random.randint(1000000000, 9999999999)}"
+                while Produk.objects.filter(sku=sku).exists():
+                    sku = f"{sku_prefix}-{random.randint(1000000000, 9999999999)}"
+                    
+                # Buat Produk baru
+                produk = Produk.objects.create(
+                    sku=sku,
+                    nama=nama_produk.strip(),
+                    kategori=kategori,
+                    satuan=satuan,
+                    harga_beli=harga_satuan,
+                    harga_jual=harga_satuan * Decimal('1.2'),  # Markup 20%
+                    tipe=tipe_item,  # Tipe: produk atau sparepart
+                    aktif=True,
+                    dibuat_oleh=self.request.user
+                )
+                    
+                # Buat PurchaseOrderItem
+                PurchaseOrderItem.objects.create(
+                    purchase_order=po,
+                    produk=produk,
+                    jumlah=jumlah,
+                    harga_satuan=harga_satuan,
+                    catatan=catatan
+                )
+                    
+                # Update stok langsung di gudang tujuan (dengan lock)
+                from apps.produk.models import Stok
+                stok, created = Stok.objects.select_for_update().get_or_create(
+                    produk=produk,
+                    gudang=po.gudang,
+                    defaults={'jumlah': 0}
+                )
+                stok.jumlah += jumlah
+                stok.save()
+
+                # Update cabang produk ke gudang dengan stok terbanyak
+                stok_terbanyak = Stok.objects.filter(
+                    produk=produk, jumlah__gt=0
+                ).order_by('-jumlah').first()
+
+                if stok_terbanyak:
+                    if produk.cabang != stok_terbanyak.gudang:
+                        produk.cabang = stok_terbanyak.gudang
+                        produk.save(update_fields=['cabang'])
+                    
+                items_created += 1
+                i += 1
+                
+            # Set status langsung ke received
+            po.status = 'received'
+            po.calculate_total()
+            po.save()
         
-        # Notifikasi dan log di luar atomic (opsional)
+        # Notifikasi dan log di luar atomic (opsional, tidak boleh rollback PO)
         try:
             from apps.automation.signals import kirim_notifikasi_purchase_order
             kirim_notifikasi_purchase_order(po)
-        except ProtectedError:
-            return JsonResponse({'success': False, 'message': 'Data tidak dapat dihapus karena sedang digunakan atau terkait dengan data lain.'}, status=400)
-        except Exception as e:
+        except Exception:
             pass
         
         # Log activity
         from apps.activity_log.middleware import ActivityLogMiddleware
-        ActivityLogMiddleware.log_activity(
-            self.request,
-            action='create',
-            model_name='Purchase Order',
-            object_id=po.pk,
-            object_repr=str(po),
-            description=f'Membuat Purchase Order: {po.nomor_po} ke {po.supplier.nama} ({items_created} produk baru)'
-        )
+        try:
+            ActivityLogMiddleware.log_activity(
+                self.request,
+                action='create',
+                model_name='Purchase Order',
+                object_id=po.pk,
+                object_repr=str(po),
+                description=f'Membuat Purchase Order: {po.nomor_po} ke {po.supplier.nama} ({items_created} produk baru)'
+            )
+        except Exception:
+            pass
         
         # Tampilkan pesan sukses ke user
         messages.success(self.request, f'Purchase Order {po.nomor_po} berhasil dibuat dengan {items_created} produk baru')
@@ -387,7 +417,21 @@ class PurchaseOrderDetailView(ReadPermissionMixin, TemplateView):
         context = TemplateLayout.init(self, super().get_context_data(**kwargs))
         po_id = kwargs.get('pk')
         # Data konteks: purchase_order — untuk ditampilkan di template
-        context['purchase_order'] = get_object_or_404(PurchaseOrder, pk=po_id)
+        purchase_order = get_object_or_404(
+            PurchaseOrder.objects.select_related(
+                'supplier', 'gudang', 'metode_pembayaran', 'dibuat_oleh', 'disetujui_oleh'
+            ).prefetch_related('items__produk', 'items__satuan_transaksi'),
+            pk=po_id
+        )
+        context['purchase_order'] = purchase_order
+        try:
+            from apps.kas_bank.services import metode_is_credit
+            from apps.hutang.models import Hutang
+            context['is_credit_tempo'] = purchase_order.metode_pembayaran is None or metode_is_credit(purchase_order.metode_pembayaran)
+            context['hutang_po'] = Hutang.objects.filter(purchase_order=purchase_order, sumber='po').first()
+        except Exception:
+            context['is_credit_tempo'] = False
+            context['hutang_po'] = None
         return context
 
 
@@ -406,7 +450,12 @@ class PurchaseOrderPrintView(ReadPermissionMixin, TemplateView):
         context = super().get_context_data(**kwargs)
         po_id = kwargs.get('pk')
         # Data konteks: purchase_order — untuk ditampilkan di template
-        context['purchase_order'] = get_object_or_404(PurchaseOrder, pk=po_id)
+        context['purchase_order'] = get_object_or_404(
+            PurchaseOrder.objects.select_related(
+                'supplier', 'gudang', 'metode_pembayaran', 'dibuat_oleh', 'disetujui_oleh'
+            ).prefetch_related('items__produk', 'items__satuan_transaksi'),
+            pk=po_id
+        )
         # Import dari modul internal proyek
         from apps.pengaturan.models import TemplateCetak, PengaturanPerusahaan
         # Data konteks: template — untuk ditampilkan di template
@@ -430,6 +479,12 @@ class PurchaseOrderUpdateView(UpdatePermissionMixin, UpdateView):
     permission_module = 'pembelian'
     permission_sub_module = 'purchase_order'
     
+    def dispatch(self, request, *args, **kwargs):
+        """Simpan old_total sebelum edit untuk propagasi jurnal."""
+        po = self.get_object()
+        self._old_total = po.total_harga
+        return super().dispatch(request, *args, **kwargs)
+
     def get_success_url(self):
         """URL redirect setelah operasi berhasil."""
         return reverse_lazy('pembelian:purchase-order-detail', kwargs={'pk': self.object.pk})
@@ -465,24 +520,35 @@ class PurchaseOrderUpdateView(UpdatePermissionMixin, UpdateView):
         formset = context['formset']
         
         if formset.is_valid():
-            self.object = form.save()
-            formset.instance = self.object
-            formset.save()
+            with transaction.atomic():
+                self.object = form.save()
+                formset.instance = self.object
+                formset.save()
             
-            # Recalculate total setelah items berubah
-            self.object.calculate_total()
-            self.object.save()
+                # Recalculate total setelah items berubah
+                self.object.calculate_total()
+                self.object.save()
+
+                # Propagasi edit: reverse jurnal lama + buat baru jika PO sudah punya jurnal
+                from apps.core.propagation import handle_document_edit
+                from apps.akuntansi.models import JurnalEntry
+
+                if JurnalEntry.objects.filter(sumber='po', sumber_id=self.object.pk, is_reversed=False).exists():
+                    handle_document_edit(self.object, old_total=self._old_total, user=self.request.user)
             
             # Log activity
             from apps.activity_log.middleware import ActivityLogMiddleware
-            ActivityLogMiddleware.log_activity(
-                self.request,
-                action='update',
-                model_name='Purchase Order',
-                object_id=self.object.pk,
-                object_repr=str(self.object),
-                description=f'Mengubah Purchase Order: {self.object.nomor_po} - Rp {self.object.total_harga:,.0f}'
-            )
+            try:
+                ActivityLogMiddleware.log_activity(
+                    self.request,
+                    action='update',
+                    model_name='Purchase Order',
+                    object_id=self.object.pk,
+                    object_repr=str(self.object),
+                    description=f'Mengubah Purchase Order: {self.object.nomor_po} - Rp {self.object.total_harga:,.0f}'
+                )
+            except Exception:
+                pass
             
             # Tampilkan pesan sukses ke user
             messages.success(self.request, 'Purchase Order berhasil diupdate')
@@ -521,23 +587,31 @@ class PurchaseOrderDeleteView(DeletePermissionMixin, DeleteView):
         from django.http import JsonResponse
         # Import dari modul internal proyek
         from apps.produk.models import Stok
+        from apps.fraud_detection.signals import set_current_delete_user, clear_current_delete_user
         
         self.object = self.get_object()
         po = self.object
         
         # Log activity sebelum hapus (agar referensi masih ada)
         from apps.activity_log.middleware import ActivityLogMiddleware
-        ActivityLogMiddleware.log_activity(
-            request,
-            action='delete',
-            model_name='Purchase Order',
-            object_id=po.pk,
-            object_repr=str(po),
-            description=f'Menghapus Purchase Order: {po.nomor_po}'
-        )
+        try:
+            ActivityLogMiddleware.log_activity(
+                request,
+                action='delete',
+                model_name='Purchase Order',
+                object_id=po.pk,
+                object_repr=str(po),
+                description=f'Menghapus Purchase Order: {po.nomor_po}'
+            )
+        except Exception:
+            pass
         
         # Seluruh proses rollback + hapus dalam atomic transaction
         try:
+            # 0. Reversal jurnal + cancel mutasi/hutang (propagation service)
+            from apps.core.propagation import handle_document_delete
+            handle_document_delete(po, user=request.user)
+
             # 1. Kumpulkan produk orphan SEBELUM hapus PO
             orphan_products = []
             for item in po.items.all():
@@ -550,6 +624,16 @@ class PurchaseOrderDeleteView(DeletePermissionMixin, DeleteView):
                     if stok.jumlah < 0:
                         stok.jumlah = 0  # Pastikan tidak negatif
                     stok.save()
+
+                    # Update cabang produk ke gudang dengan stok terbanyak
+                    stok_terbanyak = Stok.objects.filter(
+                        produk=item.produk, jumlah__gt=0
+                    ).order_by('-jumlah').first()
+
+                    if stok_terbanyak:
+                        if item.produk.cabang != stok_terbanyak.gudang:
+                            item.produk.cabang = stok_terbanyak.gudang
+                            item.produk.save(update_fields=['cabang'])
                 except Stok.DoesNotExist:
                     pass
                     
@@ -561,7 +645,9 @@ class PurchaseOrderDeleteView(DeletePermissionMixin, DeleteView):
                         orphan_products.append(item.produk.pk)
                 
             # 2. Hapus PO dulu (items CASCADE otomatis → FK ke produk terlepas)
+            set_current_delete_user(request.user)
             po.delete()
+            clear_current_delete_user()
             
             # 3. Hapus produk orphan SETELAH PO & items sudah dihapus
             from apps.produk.models import Produk
@@ -570,8 +656,10 @@ class PurchaseOrderDeleteView(DeletePermissionMixin, DeleteView):
             
             return JsonResponse({'success': True, 'message': 'Purchase Order berhasil dihapus'})
         except ProtectedError:
+            clear_current_delete_user()
             return JsonResponse({'success': False, 'message': 'Data tidak dapat dihapus karena sedang digunakan atau terkait dengan data lain.'}, status=400)
         except Exception as e:
+            clear_current_delete_user()
             return JsonResponse({'success': False, 'message': str(e)}, status=400)
 
 
@@ -602,6 +690,12 @@ def purchase_order_receive(request, pk):
     
     # Blok penanganan error — coba jalankan kode di bawah
     try:
+        # Validasi MetodePembayaran mapping sebelum receive (untuk jurnal otomatis)
+        from apps.core.validators import validate_metode_pembayaran_mapping
+        from apps.kas_bank.services import metode_is_credit
+        if po.metode_pembayaran and not metode_is_credit(po.metode_pembayaran):
+            validate_metode_pembayaran_mapping(po.metode_pembayaran)
+
         # Auto-approve jika masih draft
         if po.status == 'draft':
             po.status = 'approved'
@@ -612,14 +706,17 @@ def purchase_order_receive(request, pk):
         
         # Log activity
         from apps.activity_log.middleware import ActivityLogMiddleware
-        ActivityLogMiddleware.log_activity(
-            request,
-            action='update',
-            model_name='Purchase Order',
-            object_id=po.pk,
-            object_repr=str(po),
-            description=f'Menerima barang untuk PO: {po.nomor_po} - stok diupdate'
-        )
+        try:
+            ActivityLogMiddleware.log_activity(
+                request,
+                action='update',
+                model_name='Purchase Order',
+                object_id=po.pk,
+                object_repr=str(po),
+                description=f'Menerima barang untuk PO: {po.nomor_po} - stok diupdate'
+            )
+        except Exception:
+            pass
         
         # Tampilkan pesan sukses ke user
         messages.success(request, f'Barang untuk PO {po.nomor_po} berhasil diterima dan stok diupdate')
@@ -636,3 +733,509 @@ def purchase_order_receive(request, pk):
     
     # Redirect ke halaman tujuan
     return redirect('pembelian:purchase-order-detail', pk=pk)
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║           IMPORT PURCHASE ORDER (CSV/EXCEL)                    ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+class PurchaseOrderImportView(CreatePermissionMixin, TemplateView):
+    """
+    Halaman import Purchase Order dari file CSV atau Excel.
+
+    URL: /pembelian/purchase-order/import/
+    Permission: pembelian.purchase_order.create
+
+    Mendukung format:
+    - CSV (.csv) → Dengan auto-detect delimiter (koma, titik koma, tab)
+    - Excel (.xlsx, .xls) → Parse HTML table (format export dari sistem)
+
+    Alur import:
+    1. User upload file CSV/Excel
+    2. Sistem parsing file → ambil data per baris
+    3. Group baris berdasarkan supplier + gudang → 1 PO per grup
+    4. Untuk setiap baris: buat/cari Produk → buat PO Item → update stok
+    5. Return summary: berapa PO berhasil, berapa item gagal + alasan error
+
+    Kolom CSV/Excel (sesuai form Purchase Order Baru):
+    - supplier * (wajib) — nama supplier
+    - gudang (opsional) — nama/kode gudang tujuan
+    - nama_produk * (wajib) — nama produk yang dibeli
+    - tipe (opsional) — produk / sparepart (default: produk)
+    - kategori (opsional) — nama kategori
+    - satuan (opsional) — nama satuan (default: pcs)
+    - jumlah * (wajib) — qty pembelian
+    - harga_satuan * (wajib) — harga beli per unit
+    - catatan (opsional) — catatan per item
+    - pajak (opsional) — pajak PO (default: 0)
+    - metode_pembayaran (opsional) — nama metode pembayaran
+    """
+    template_name = 'pembelian/purchase_order_import.html'
+    permission_module = 'pembelian'
+    permission_sub_module = 'purchase_order_import'
+
+    def get_context_data(self, **kwargs):
+        """Menambahkan data konteks tambahan ke template."""
+        context = TemplateLayout.init(self, super().get_context_data(**kwargs))
+        context['supplier_list'] = Supplier.objects.filter(aktif=True)
+        from apps.produk.models import Gudang
+        context['gudang_list'] = Gudang.objects.filter(aktif=True)
+        return context
+
+    def post(self, request, *args, **kwargs):
+        """
+        Proses upload dan import file Purchase Order (POST).
+
+        Tahapan:
+        1. Validasi: file ada? format didukung?
+        2. Parse file (CSV atau HTML/Excel)
+        3. Group baris berdasarkan supplier + gudang → 1 PO per grup
+        4. Loop setiap baris dalam grup → buat PO + items
+        5. Return summary (jumlah PO berhasil/gagal)
+        """
+        from django.http import JsonResponse
+        import logging
+        logger = logging.getLogger(__name__)
+
+        is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+        # Validasi: file harus ada
+        if 'file' not in request.FILES:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': 'Tidak ada file yang diupload!'})
+            messages.error(request, 'Tidak ada file yang diupload!')
+            return self.get(request, *args, **kwargs)
+
+        file = request.FILES['file']
+        file_name = file.name.lower()
+
+        # Validasi: format file
+        if not (file_name.endswith('.csv') or file_name.endswith('.xlsx') or file_name.endswith('.xls')):
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': 'Format file tidak didukung! Gunakan CSV atau Excel.'})
+            messages.error(request, 'Format file tidak didukung! Gunakan CSV atau Excel.')
+            return self.get(request, *args, **kwargs)
+
+        try:
+            import io
+            import csv
+
+            if file_name.endswith('.csv'):
+                # ===== PARSE CSV =====
+                decoded_file = file.read().decode('utf-8-sig')
+
+                # Skip 'sep=,' directive jika ada (dari Excel)
+                lines = decoded_file.splitlines()
+                if lines and lines[0].strip().startswith('sep='):
+                    decoded_file = '\n'.join(lines[1:])
+
+                # Auto-detect delimiter
+                io_string = io.StringIO(decoded_file)
+                sample = io_string.read(1024)
+                io_string.seek(0)
+
+                try:
+                    sniffer = csv.Sniffer()
+                    dialect = sniffer.sniff(sample, delimiters=',;\t')
+                    delimiter = dialect.delimiter
+                except Exception:
+                    delimiter = ','
+
+                reader = csv.DictReader(io_string, delimiter=delimiter)
+                rows = list(reader)
+
+            else:
+                # ===== PARSE EXCEL (HTML format) =====
+                try:
+                    file.seek(0)
+                    content_bytes = file.read()
+
+                    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']
+                    html_content = None
+
+                    for enc in encodings:
+                        try:
+                            html_content = content_bytes.decode(enc)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+
+                    if not html_content:
+                        raise ValueError("Could not decode file")
+
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html_content, 'html.parser')
+
+                    # Cek apakah frameset
+                    frameset = soup.find('frameset')
+                    if frameset:
+                        raise ValueError("File export ini memiliki format frameset Excel. Silakan gunakan 'Download Template CSV' atau export ulang ke format yang lebih sederhana.")
+
+                    table = soup.find('table')
+
+                    if not table:
+                        import re
+                        table_match = re.search(r'<table[^>]*>(.*?)</table>', html_content, re.DOTALL | re.IGNORECASE)
+                        if table_match:
+                            soup = BeautifulSoup(table_match.group(0), 'html.parser')
+                            table = soup.find('table')
+
+                    if not table:
+                        raise ValueError("Tidak ditemukan tabel dalam file. Pastikan file adalah hasil export atau template yang valid.")
+
+                    # Ekstrak header
+                    headers = []
+                    header_row = table.find('thead')
+                    if header_row:
+                        headers = [th.get_text(strip=True).lower() for th in header_row.find_all('th')]
+                    else:
+                        first_row = table.find('tr')
+                        if first_row:
+                            headers = [td.get_text(strip=True).lower() for td in first_row.find_all(['th', 'td'])]
+
+                    if not headers or 'nama_produk' not in headers:
+                        raise ValueError(f"Header tidak valid atau kolom 'nama_produk' tidak ditemukan. Headers ditemukan: {headers}")
+
+                    # Ekstrak baris data
+                    rows = []
+                    rows_iter = table.find_all('tr')
+                    if header_row:
+                        rows_iter = table.find('tbody').find_all('tr') if table.find('tbody') else rows_iter[1:]
+                    else:
+                        rows_iter = rows_iter[1:]
+
+                    for tr in rows_iter:
+                        cells = tr.find_all(['td', 'th'])
+                        if not cells:
+                            continue
+
+                        row_text = ''.join([cell.get_text(strip=True) for cell in cells])
+                        if not row_text or row_text.replace('\xa0', '').strip() == '':
+                            continue
+
+                        row_data = {}
+                        for idx, cell in enumerate(cells):
+                            if idx < len(headers):
+                                cell_text = cell.get_text(strip=True).replace('\xa0', '').strip()
+                                row_data[headers[idx]] = cell_text if cell_text else ''
+
+                        if row_data.get('nama_produk', '').strip():
+                            rows.append(row_data)
+
+                except Exception as e:
+                    logger.warning("HTML parsing error saat import PO: %s", e)
+                    if is_ajax:
+                        return JsonResponse({'success': False, 'message': f'Gagal membaca file: {str(e)}'})
+                    messages.error(request, f'Gagal membaca file: {str(e)}')
+                    return self.get(request, *args, **kwargs)
+
+            # ===== GROUP BARIS BERDASARKAN SUPPLIER + GUDANG =====
+            from collections import defaultdict
+            groups = defaultdict(list)
+            for row in rows:
+                supplier_key = str(row.get('supplier', '')).strip()
+                gudang_key = str(row.get('gudang', '')).strip()
+                group_key = f"{supplier_key}||{gudang_key}"
+                groups[group_key].append(row)
+
+            # ===== PROSES SETIAP GRUP → 1 PO PER GRUP =====
+            from apps.produk.models import Produk, Kategori, Satuan, Gudang, Stok
+            from apps.pos.models import MetodePembayaran
+            from decimal import Decimal, InvalidOperation
+            import random
+
+            po_count = 0
+            item_success = 0
+            item_error = 0
+            errors = []
+
+            for group_key, group_rows in groups.items():
+                supplier_nama, gudang_nama = group_key.split('||')
+
+                # Validasi supplier (wajib)
+                if not supplier_nama:
+                    for idx_r, r in enumerate(group_rows):
+                        errors.append(f"Baris: Kolom 'supplier' kosong untuk produk '{r.get('nama_produk', '?')}'")
+                        item_error += len(group_rows)
+                    continue
+
+                try:
+                    with transaction.atomic():
+                        # Get or Create Supplier
+                        supplier_obj = Supplier.objects.filter(nama__iexact=supplier_nama, aktif=True).first()
+                        if not supplier_obj:
+                            supplier_obj = Supplier.objects.filter(kode__iexact=supplier_nama, aktif=True).first()
+                        if not supplier_obj:
+                            # Auto-create supplier baru
+                            kode_supplier = f"SUP-{random.randint(100, 999)}"
+                            while Supplier.objects.filter(kode=kode_supplier).exists():
+                                kode_supplier = f"SUP-{random.randint(100, 999)}"
+                            supplier_obj = Supplier.objects.create(
+                                kode=kode_supplier,
+                                nama=supplier_nama,
+                                aktif=True
+                            )
+
+                        # Get Gudang
+                        gudang_obj = None
+                        if gudang_nama:
+                            gudang_obj = Gudang.objects.filter(nama__iexact=gudang_nama, aktif=True).first()
+                            if not gudang_obj:
+                                gudang_obj = Gudang.objects.filter(kode__iexact=gudang_nama, aktif=True).first()
+                        if not gudang_obj:
+                            gudang_obj = Gudang.objects.filter(aktif=True).first()
+                        if not gudang_obj:
+                            gudang_obj = Gudang.objects.create(
+                                kode='GD-DEFAULT', nama='Gudang Utama', aktif=True
+                            )
+
+                        # Metode Pembayaran (dari baris pertama grup)
+                        metode_nama = str(group_rows[0].get('metode_pembayaran', '')).strip()
+                        metode_obj = None
+                        if metode_nama:
+                            metode_obj = MetodePembayaran.objects.filter(
+                                nama__iexact=metode_nama, aktif=True
+                            ).first()
+                        if not metode_obj:
+                            metode_obj = MetodePembayaran.objects.filter(aktif=True).first()
+
+                        # Pajak (dari baris pertama grup)
+                        pajak_val = Decimal('0')
+                        pajak_str = str(group_rows[0].get('pajak', '0')).strip()
+                        try:
+                            pajak_val = Decimal(pajak_str) if pajak_str else Decimal('0')
+                        except (ValueError, InvalidOperation):
+                            pajak_val = Decimal('0')
+
+                        # Biaya pengiriman/ongkir (dari baris pertama grup)
+                        biaya_pengiriman_val = Decimal('0')
+                        biaya_pengiriman_str = str(
+                            group_rows[0].get('biaya_pengiriman', group_rows[0].get('ongkir', '0'))
+                        ).strip()
+                        try:
+                            biaya_pengiriman_val = Decimal(biaya_pengiriman_str) if biaya_pengiriman_str else Decimal('0')
+                        except (ValueError, InvalidOperation):
+                            biaya_pengiriman_val = Decimal('0')
+
+                        # Buat PO
+                        po = PurchaseOrder(
+                            supplier=supplier_obj,
+                            gudang=gudang_obj,
+                            metode_pembayaran=metode_obj,
+                            pajak=pajak_val,
+                            biaya_pengiriman=biaya_pengiriman_val,
+                            dibuat_oleh=request.user,
+                        )
+                        po.nomor_po = po.generate_nomor()
+                        from django.utils import timezone
+                        po.tanggal = timezone.now()
+                        po.save()
+
+                        items_in_po = 0
+
+                        for row_idx, row in enumerate(group_rows, start=1):
+                            try:
+                                nama_produk = str(row.get('nama_produk', '')).strip()
+                                if not nama_produk:
+                                    errors.append(f"PO {po.nomor_po} baris {row_idx}: nama_produk kosong")
+                                    item_error += 1
+                                    continue
+
+                                jumlah_str = str(row.get('jumlah', '0')).strip()
+                                harga_str = str(row.get('harga_satuan', '0')).strip()
+
+                                try:
+                                    jumlah = Decimal(jumlah_str) if jumlah_str else Decimal('0')
+                                    harga_satuan = Decimal(harga_str) if harga_str else Decimal('0')
+                                except (ValueError, InvalidOperation):
+                                    errors.append(f"PO {po.nomor_po} baris {row_idx}: jumlah/harga tidak valid")
+                                    item_error += 1
+                                    continue
+
+                                if jumlah <= 0 or harga_satuan <= 0:
+                                    errors.append(f"PO {po.nomor_po} baris {row_idx}: jumlah/harga harus > 0")
+                                    item_error += 1
+                                    continue
+
+                                # Kategori
+                                kategori = None
+                                kategori_nama = str(row.get('kategori', '')).strip()
+                                if kategori_nama:
+                                    kategori, _ = Kategori.objects.get_or_create(
+                                        nama=kategori_nama,
+                                        defaults={'dibuat_oleh': request.user}
+                                    )
+
+                                # Satuan
+                                satuan_nama = str(row.get('satuan', 'pcs')).strip()
+                                satuan, _ = Satuan.objects.get_or_create(
+                                    nama=satuan_nama,
+                                    defaults={'singkatan': satuan_nama[:3].upper()}
+                                )
+
+                                # Tipe
+                                tipe_item = str(row.get('tipe', 'produk')).strip().lower()
+                                if tipe_item not in ('produk', 'sparepart'):
+                                    tipe_item = 'produk'
+
+                                # Generate SKU
+                                sku_prefix = 'SPR' if tipe_item == 'sparepart' else 'PRD'
+                                sku = f"{sku_prefix}-{random.randint(1000000000, 9999999999)}"
+                                while Produk.objects.filter(sku=sku).exists():
+                                    sku = f"{sku_prefix}-{random.randint(1000000000, 9999999999)}"
+
+                                # Catatan item
+                                catatan_item = str(row.get('catatan', '')).strip()
+
+                                # Buat Produk baru
+                                produk = Produk.objects.create(
+                                    sku=sku,
+                                    nama=nama_produk,
+                                    kategori=kategori,
+                                    satuan=satuan,
+                                    harga_beli=harga_satuan,
+                                    harga_jual=harga_satuan * Decimal('1.2'),
+                                    tipe=tipe_item,
+                                    aktif=True,
+                                    cabang=gudang_obj,
+                                    dibuat_oleh=request.user,
+                                    metode_pembayaran=metode_obj,
+                                )
+
+                                # Buat PO Item
+                                PurchaseOrderItem.objects.create(
+                                    purchase_order=po,
+                                    produk=produk,
+                                    jumlah=jumlah,
+                                    harga_satuan=harga_satuan,
+                                    catatan=catatan_item,
+                                )
+
+                                # Update stok langsung di gudang tujuan (dengan lock)
+                                stok, _ = Stok.objects.select_for_update().get_or_create(
+                                    produk=produk,
+                                    gudang=gudang_obj,
+                                    defaults={'jumlah': 0}
+                                )
+                                stok.jumlah += jumlah
+                                stok.save()
+
+                                # Update cabang produk ke gudang dengan stok terbanyak
+                                # (sama persis dengan logika manual PO create)
+                                stok_terbanyak = Stok.objects.filter(
+                                    produk=produk, jumlah__gt=0
+                                ).order_by('-jumlah').first()
+
+                                if stok_terbanyak:
+                                    if produk.cabang != stok_terbanyak.gudang:
+                                        produk.cabang = stok_terbanyak.gudang
+                                        produk.save(update_fields=['cabang'])
+
+                                items_in_po += 1
+                                item_success += 1
+
+                            except Exception as e:
+                                errors.append(f"PO {po.nomor_po} baris {row_idx}: {str(e)}")
+                                item_error += 1
+
+                        if items_in_po > 0:
+                            # Set status received dan calculate total
+                            po.status = 'received'
+                            po.calculate_total()
+                            po.save()
+                            po_count += 1
+
+                            # Notifikasi Telegram (di luar atomic, opsional)
+                            try:
+                                from apps.automation.signals import kirim_notifikasi_purchase_order
+                                kirim_notifikasi_purchase_order(po)
+                            except Exception:
+                                pass
+
+                            # Log activity (sama persis dengan manual PO create)
+                            try:
+                                from apps.activity_log.middleware import ActivityLogMiddleware
+                                ActivityLogMiddleware.log_activity(
+                                    request,
+                                    action='create',
+                                    model_name='Purchase Order',
+                                    object_id=po.pk,
+                                    object_repr=str(po),
+                                    description=f'Import Purchase Order: {po.nomor_po} ke {po.supplier.nama} ({items_in_po} produk baru)'
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            # Tidak ada item berhasil → hapus PO kosong
+                            po.delete()
+
+                except Exception as e:
+                    errors.append(f"Supplier '{supplier_nama}': {str(e)}")
+                    item_error += len(group_rows)
+
+            # ===== BUAT PESAN RESPONSE =====
+            success_msg = ''
+            error_msg = ''
+
+            if po_count > 0:
+                success_msg = f'<strong>Berhasil membuat {po_count} Purchase Order dengan {item_success} item!</strong>'
+
+            if item_error > 0:
+                error_details = '<br>'.join(errors[:5]) if len(errors) <= 5 else '<br>'.join(errors[:5]) + f'<br>... dan {len(errors)-5} error lainnya'
+                error_msg = f'<br><strong>{item_error} item gagal diimport</strong><br><small>{error_details}</small>'
+
+            final_message = success_msg + error_msg
+
+            if is_ajax:
+                if po_count > 0:
+                    return JsonResponse({'success': True, 'message': final_message})
+                else:
+                    return JsonResponse({'success': False, 'message': final_message or 'Tidak ada data yang berhasil diimport.'})
+            else:
+                if po_count > 0:
+                    messages.success(request, f'Berhasil membuat {po_count} Purchase Order dengan {item_success} item!')
+                if item_error > 0:
+                    error_msg_plain = f'{item_error} item gagal diimport. '
+                    if len(errors) <= 5:
+                        error_msg_plain += 'Error: ' + '; '.join(errors)
+                    else:
+                        error_msg_plain += 'Error: ' + '; '.join(errors[:5]) + f'... dan {len(errors)-5} error lainnya'
+                    messages.warning(request, error_msg_plain)
+
+        except Exception as e:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': f'Terjadi kesalahan: {str(e)}'})
+            messages.error(request, f'Terjadi kesalahan: {str(e)}')
+
+        return self.get(request, *args, **kwargs)
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║              CANCEL PURCHASE ORDER                             ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+@login_required
+@require_http_methods(["POST"])
+def cancel_purchase_order(request, pk):
+    """Cancel PO yang sudah received. URL: /pembelian/po/<pk>/cancel/ (POST AJAX)"""
+    from django.http import JsonResponse
+    from apps.pembelian.models import PurchaseOrder
+    from apps.pembelian.services import transition_po_status
+    from apps.core.permissions import has_permission, is_superuser_role
+
+    if not is_superuser_role(request.user) and not has_permission(request.user, 'write', 'pembelian'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki akses.'}, status=403)
+
+    try:
+        po = PurchaseOrder.objects.get(pk=pk)
+    except PurchaseOrder.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Purchase Order tidak ditemukan.'}, status=404)
+
+    if po.status not in ['submitted', 'approved', 'received']:
+        return JsonResponse({'success': False, 'message': f'PO dengan status "{po.get_status_display()}" tidak bisa dibatalkan.'}, status=400)
+
+    try:
+        transition_po_status(po, 'cancelled', user=request.user)
+        return JsonResponse({'success': True, 'message': f'PO {po.nomor_po} berhasil dibatalkan. Jurnal pembalik dibuat, stok dikurangi.'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': f'Gagal membatalkan: {str(e)}'}, status=400)

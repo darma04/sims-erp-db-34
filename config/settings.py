@@ -71,10 +71,10 @@ INSTALLED_APPS = [
     "apps.user_management",
     "apps.produk",
     "apps.inventory",
-    "apps.pembelian",
-    "apps.penjualan",
-    "apps.pos",
-    "apps.biaya",
+    "apps.pembelian.apps.PembelianConfig",
+    "apps.penjualan.apps.PenjualanConfig",
+    "apps.pos.apps.PosConfig",
+    "apps.biaya.apps.BiayaConfig",
     "apps.laporan",
     "apps.activity_log",
     "apps.pengaturan",
@@ -83,13 +83,21 @@ INSTALLED_APPS = [
     "apps.automation",
     "apps.ai_assistant",
     "apps.fraud_detection",
+    # Akuntansi Module
+    "apps.akuntansi",
+    "apps.piutang.apps.PiutangConfig",
+    "apps.hutang.apps.HutangConfig",
+    "apps.aset.apps.AsetConfig",
+    "apps.pajak.apps.PajakConfig",
+    "apps.kas_bank.apps.KasBankConfig",
+    "apps.service_center",
     # Original Apps
-    "apps.sample",
     "apps.pages",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "apps.core.csp_middleware.CSPMiddleware",
     "django.middleware.gzip.GZipMiddleware",  # Compress responses for faster load
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -98,8 +106,10 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "apps.core.cache_middleware.TenantCacheInvalidationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "apps.core.double_submit_middleware.PreventDoubleSubmitMiddleware",
     "apps.activity_log.middleware.ActivityLogMiddleware",
     "apps.core.license_middleware.LicenseMiddleware",
     "apps.core.maintenance_middleware.MaintenanceMiddleware",
@@ -109,8 +119,8 @@ MIDDLEWARE = [
 #  LICENSE CONFIGURATION — Konfigurasi Lisensi Software
 # ==========================================================================
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "https://cls.serpgroup.cloud")
-PRODUCT_CODE = "ERP"
-DEVICE_NAME = os.environ.get("DEVICE_NAME", "SERPTECH Server")
+PRODUCT_CODE = "SIMS"
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "SIMS Server")
 
 ROOT_URLCONF = "config.urls"
 
@@ -149,13 +159,33 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
+# Set DATABASE_ENGINE=postgresql di .env untuk aktifkan PostgreSQL (production)
+# Default: sqlite (development lokal — tidak perlu setup apapun)
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+_DB_ENGINE = os.environ.get("DATABASE_ENGINE", "sqlite").lower()
+
+if _DB_ENGINE in {"postgres", "postgresql"}:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("DB_NAME", "sims_db"),
+            "USER": os.environ.get("DB_USER", "postgres"),
+            "PASSWORD": os.environ.get("DB_PASSWORD", ""),
+            "HOST": os.environ.get("DB_HOST", "localhost"),
+            "PORT": os.environ.get("DB_PORT", "5432"),
+            "CONN_MAX_AGE": int(os.environ.get("DB_CONN_MAX_AGE", "600")),
+            "OPTIONS": {
+                "connect_timeout": 10,
+            },
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 
 # Password validation
@@ -258,14 +288,14 @@ LOGIN_REDIRECT_URL = "/"
 
 SESSION_ENGINE = "django.contrib.sessions.backends.db"
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_AGE = 86400  # 24 hours
-SESSION_SAVE_EVERY_REQUEST = True  # Refresh session expiry setiap request (cegah logout mendadak)
+SESSION_SAVE_EVERY_REQUEST = os.environ.get("SESSION_SAVE_EVERY_REQUEST", "False").lower() in ['true', 'yes', '1']
 
 # Cookie name unik per aplikasi — WAJIB agar session & CSRF tidak saling tabrakan
 # saat multiple Django app berjalan di localhost (port berbeda)
-SESSION_COOKIE_NAME = "serptech_sessionid"
-CSRF_COOKIE_NAME = "serptech_csrftoken"
+SESSION_COOKIE_NAME = "sims_sessionid"
+CSRF_COOKIE_NAME = "sims_csrftoken"
+CSRF_COOKIE_HTTPONLY = False
 
 # CSRF Failure Handler — Redirect ramah saat token kedaluwarsa (bukan error 403)
 CSRF_FAILURE_VIEW = "auth.csrf_failure.csrf_failure_view"
@@ -290,48 +320,61 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 
 # --- Pengaturan KHUSUS PRODUCTION (hanya aktif saat DEBUG=False) ---
 if not DEBUG:
-    # HTTPS wajib: semua HTTP request di-redirect ke HTTPS
     SECURE_SSL_REDIRECT = True
-
-    # HSTS (HTTP Strict Transport Security):
-    # Browser akan SELALU menggunakan HTTPS selama 1 tahun
-    # Bahkan jika user mengetik http:// → otomatis jadi https://
-    SECURE_HSTS_SECONDS = 31536000       # 1 tahun dalam detik
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # Berlaku juga untuk subdomain
-    SECURE_HSTS_PRELOAD = True             # Daftarkan ke HSTS preload list browser
-
-    # Cookie hanya dikirim via HTTPS (cegah penyadapan session)
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-
-    # Proxy header: PythonAnywhere menggunakan reverse proxy
-    # Header ini memberitahu Django bahwa request aslinya HTTPS
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    # ================================================================
+    # COOKIE SECURE FLAG — DINONAKTIFKAN untuk kompatibilitas Android WebView
+    # ================================================================
+    # Android WebView (Capacitor) memiliki bug di mana cookie dengan flag 'Secure'
+    # TIDAK disimpan saat proses redirect 302 setelah POST login.
+    # HSTS sudah memaksa semua koneksi menjadi HTTPS, jadi keamanan tetap terjaga.
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SAMESITE = "Lax"
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-
-    # Referrer Policy: jangan kirim URL lengkap ke situs eksternal
     SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
 else:
-    # Development: cookie bisa dikirim tanpa HTTPS
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SAMESITE = "Lax"
     SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
 
 # Your stuff...
 # ------------------------------------------------------------------------------
 
 # Caching Configuration
 # ------------------------------------------------------------------------------
-# Using local memory cache for development (no setup required)
-# For production, consider Redis: django_redis.cache.RedisCache
+# Set CACHE_BACKEND=redis di .env untuk aktifkan Redis (production)
+# Default: locmem (development lokal — tidak perlu setup apapun)
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'erp-cache',
-        'OPTIONS': {
-            'MAX_ENTRIES': 1000,
-            'CULL_FREQUENCY': 3,  # Hapus 1/3 dari entri saat MAX_ENTRIES tercapai
+_CACHE_BACKEND = os.environ.get("CACHE_BACKEND", "locmem").lower()
+
+if _CACHE_BACKEND == "redis":
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            },
+            'KEY_PREFIX': 'sims',
+            'TIMEOUT': 300,
         }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'erp-cache',
+            'OPTIONS': {
+                'MAX_ENTRIES': 1000,
+                'CULL_FREQUENCY': 3,
+            }
+        }
+    }
 
 # Template Caching - Speeds up template rendering significantly
 # Templates are compiled once and cached in memory

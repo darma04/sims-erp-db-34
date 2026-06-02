@@ -37,6 +37,7 @@ from django.conf.urls.static import static
 from django.http import JsonResponse
 from django.contrib.auth.decorators import login_required
 from django.db.models import Q
+from apps.core.cache_views import refresh_cache_view
 from web_project.views import custom_error_404, custom_error_403, custom_error_400, custom_error_500
 
 
@@ -189,6 +190,35 @@ def global_search_api(request):
                 'url': '/pembelian/purchase-order/',
             })
 
+        # 11. Order Service
+        from apps.service_center.models import OrderService as SC_OrderService
+        sc_qs = SC_OrderService.objects.filter(
+            Q(nomor_service__icontains=query) | Q(pelanggan__nama__icontains=query) |
+            Q(merek__icontains=query) | Q(model_tipe__icontains=query)
+        )[:5]
+        for sc in sc_qs:
+            results.append({
+                'title': sc.nomor_service,
+                'subtitle': f'{sc.pelanggan.nama} - {sc.merek} {sc.model_tipe or ""}',
+                'icon': 'ri-tools-line',
+                'category': 'Order Service',
+                'url': f'/service/order/{sc.pk}/',
+            })
+
+        # 12. Pelanggan Service
+        from apps.service_center.models import Pelanggan as SC_Pelanggan
+        sc_plg = SC_Pelanggan.objects.filter(
+            Q(nama__icontains=query) | Q(telepon__icontains=query) | Q(kode__icontains=query)
+        )[:3]
+        for p in sc_plg:
+            results.append({
+                'title': p.nama,
+                'subtitle': f'{p.kode} - {p.telepon}',
+                'icon': 'ri-user-heart-line',
+                'category': 'Pelanggan Service',
+                'url': '/service/pelanggan/',
+            })
+
     except Exception:
         pass  # Jika model tidak ada, skip
 
@@ -208,6 +238,7 @@ urlpatterns = [
     
     # Global Search API — endpoint pencarian global untuk semua modul
     path("api/search/", global_search_api, name='global_search'),
+    path("core/cache/refresh/", refresh_cache_view, name='core_refresh_cache'),
     
     # License Activation URLs
     path("", include("apps.core.license_urls")),
@@ -232,6 +263,13 @@ urlpatterns = [
     path("automation/", include("apps.automation.urls")),  # Automasi Telegram
     path("ai/", include("apps.ai_assistant.urls")),  # AI Chat Assistant
     path("fraud/", include("apps.fraud_detection.urls")),  # Fraud Detection
+    path("piutang/", include("apps.piutang.urls")),  # Piutang (Accounts Receivable)
+    path("akuntansi/", include("apps.akuntansi.urls")),  # Akuntansi (Core Accounting)
+    path("kas-bank/", include("apps.kas_bank.urls")),  # Kas & Bank (Treasury)
+    path("hutang/", include("apps.hutang.urls")),  # Hutang (Accounts Payable)
+    path("aset/", include("apps.aset.urls")),  # Aset Tetap (Fixed Assets)
+    path("pajak/", include("apps.pajak.urls")),  # Pajak (Tax Engine)
+    path("service/", include("apps.service_center.urls")),  # Service Center Elektronik
     
     # Original URLs
     path("", include("apps.pages.urls")),

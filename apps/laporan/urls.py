@@ -45,4 +45,13 @@ urlpatterns = [
 
     # ── Laporan Keuangan ─────────────────────────────────────
     path('keuangan/', views.LaporanKeuanganView.as_view(), name='keuangan'),
+
+    # ── Laporan Service ──────────────────────────────────────────
+    path('service/', views.LaporanServiceView.as_view(), name='service'),
+
+    # ── Laporan Sparepart ────────────────────────────────────────
+    path('sparepart/', views.LaporanSparepartView.as_view(), name='sparepart'),
+
+    # ── Laporan Cabang ───────────────────────────────────────────────
+    path('cabang/', views.LaporanCabangView.as_view(), name='cabang'),
 ]

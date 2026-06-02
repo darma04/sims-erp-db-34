@@ -105,9 +105,10 @@ def export_templates(request):
     - Template HTML export → Menggunakan data ini untuk header/footer dokumen
     """
     from django.core.cache import cache
+    from apps.core.cache_utils import build_scoped_cache_key
     from apps.pengaturan.models import TemplateCetak
 
-    cache_key = 'ctx_export_templates'
+    cache_key = build_scoped_cache_key('context_processor', 'export_templates', request=request)
     cached = cache.get(cache_key)
     if cached:
         return cached
@@ -143,8 +144,9 @@ def pengaturan_perusahaan(request):
     - templates/layout/ → Template layout yang menggunakan logo, favicon, title
     """
     from django.core.cache import cache
+    from apps.core.cache_utils import build_scoped_cache_key
 
-    cache_key = 'ctx_pengaturan_perusahaan'
+    cache_key = build_scoped_cache_key('context_processor', 'pengaturan_perusahaan', request=request)
     cached = cache.get(cache_key)
     if cached:
         return cached

@@ -68,11 +68,17 @@ urlpatterns = [
     path('absensi/clock-in/', views.absensi_clock_in, name='absensi-clock-in'),
     # URL: /hr/absensi/clock-out/ — absensi-clock-out
     path('absensi/clock-out/', views.absensi_clock_out, name='absensi-clock-out'),
+    # URL: /hr/absensi/<int:pk>/lokasi-map/ — absensi-lokasi-map (Peta Folium)
+    path('absensi/<int:pk>/lokasi-map/', views.absensi_lokasi_map, name='absensi-lokasi-map'),
+    # URL: /hr/absensi/<int:pk>/detail/ — absensi-detail (Detail Absensi + Peta)
+    path('absensi/<int:pk>/detail/', views.AbsensiDetailView.as_view(), name='absensi-detail'),
     
     # Penggajian CRUD
     path('penggajian/', views.PenggajianListView.as_view(), name='penggajian'),
     # URL: /hr/penggajian/add/ — penggajian-add
     path('penggajian/add/', views.PenggajianCreateView.as_view(), name='penggajian-add'),
+    # URL: /hr/penggajian/import/ — penggajian-import
+    path('penggajian/import/', views.ImportPenggajianView.as_view(), name='penggajian-import'),
     # URL: /hr/penggajian/generate/ — penggajian-generate
     path('penggajian/generate/', views.GeneratePenggajianView.as_view(), name='penggajian-generate'),
     # URL: /hr/penggajian/<int:pk>/ — penggajian-detail
@@ -83,6 +89,10 @@ urlpatterns = [
     path('penggajian/<int:pk>/delete/', views.PenggajianDeleteView.as_view(), name='penggajian-delete'),
     # URL: /hr/penggajian/<int:pk>/status/ — penggajian-status
     path('penggajian/<int:pk>/status/', views.PenggajianUpdateStatusView.as_view(), name='penggajian-status'),
+    # URL: /hr/penggajian/<int:pk>/update-status-ajax/ — penggajian-status-ajax (AJAX JSON endpoint)
+    path('penggajian/<int:pk>/update-status-ajax/', views.penggajian_update_status_ajax, name='penggajian-status-ajax'),
+    # URL: /hr/penggajian/<int:pk>/cancel/ — penggajian-cancel (POST AJAX)
+    path('penggajian/<int:pk>/cancel/', views.cancel_penggajian, name='penggajian-cancel'),
     # URL: /hr/penggajian/<int:pk>/print/ — penggajian-print
     path('penggajian/<int:pk>/print/', views.PenggajianPrintView.as_view(), name='penggajian-print'),
     

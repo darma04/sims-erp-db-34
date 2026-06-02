@@ -376,7 +376,7 @@ def _kirim_dokumen_sync(jenis_transaksi, nomor_referensi, instance, pdf_generato
                 status='gagal',
                 error_message=str(e),
             )
-        except:
+        except Exception:
             pass
 
 
@@ -486,5 +486,5 @@ def _kirim_notifikasi_sync(jenis_transaksi, nomor_referensi, data_transaksi):
                 status='gagal',
                 error_message=str(e),
             )
-        except:
+        except Exception:
             pass

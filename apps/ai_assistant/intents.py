@@ -179,6 +179,44 @@ INTENT_KEYWORDS = {
         'instagram', 'konten sosmed', 'konten media sosial',
         'generate konten', 'buat konten', 'ide konten',
     ],
+    # ═══ SERVICE CENTER ═══
+    'service_center': [
+        'service', 'servis', 'reparasi', 'perbaikan', 'teknisi',
+        'order service', 'service center', 'service hp', 'service laptop',
+        'sparepart', 'spare part', 'suku cadang', 'onderdil',
+        'pelanggan service', 'status service', 'diagnosa',
+        'garansi service', 'biaya service', 'nota service',
+    ],
+    # ═══ MODUL KEUANGAN & AKUNTANSI ═══
+    'kas_bank': [
+        'kas', 'bank', 'kas bank', 'treasury', 'saldo kas', 'saldo bank',
+        'mutasi kas', 'mutasi bank', 'transfer kas', 'transfer bank',
+        'rekening', 'arus kas', 'cashflow', 'cash flow',
+        'saldo rekening', 'kas masuk', 'kas keluar',
+    ],
+    'akuntansi': [
+        'akuntansi', 'accounting', 'jurnal', 'buku besar', 'ledger',
+        'chart of accounts', 'coa', 'neraca', 'balance sheet',
+        'laba rugi', 'income statement', 'trial balance', 'neraca saldo',
+        'double entry', 'debit kredit', 'posting jurnal', 'tutup buku',
+        'closing', 'periode akuntansi',
+    ],
+    'piutang_hutang': [
+        'piutang', 'hutang', 'receivable', 'payable', 'ar', 'ap',
+        'tagihan', 'jatuh tempo', 'aging', 'overdue', 'belum bayar',
+        'pelunasan', 'pembayaran piutang', 'pembayaran hutang',
+        'utang', 'accounts receivable', 'accounts payable',
+    ],
+    'aset_tetap': [
+        'aset tetap', 'fixed asset', 'penyusutan', 'depresiasi',
+        'depreciation', 'disposal', 'nilai buku', 'umur ekonomis',
+        'akumulasi penyusutan', 'peralatan', 'kendaraan', 'bangunan',
+    ],
+    'pajak_ppn': [
+        'pajak', 'ppn', 'tax', 'vat', 'faktur pajak', 'ppn masukan',
+        'ppn keluaran', 'setor pajak', 'rekap ppn', 'dpp',
+        'tarif pajak', 'settlement ppn', 'restitusi',
+    ],
 }
 
 
@@ -341,6 +379,18 @@ def gather_data(intent, message=''):
             return _gather_multi_branch_analyzer(today, month_start)
         elif intent == 'content_generator':
             return _gather_content_generator()
+        elif intent == 'service_center':
+            return _gather_service_center(today, month_start)
+        elif intent == 'kas_bank':
+            return _gather_kas_bank(today, month_start)
+        elif intent == 'akuntansi':
+            return _gather_akuntansi(today, month_start)
+        elif intent == 'piutang_hutang':
+            return _gather_piutang_hutang(today, month_start)
+        elif intent == 'aset_tetap':
+            return _gather_aset_tetap()
+        elif intent == 'pajak_ppn':
+            return _gather_pajak_ppn(today, month_start)
         else:
             return _gather_umum(today, month_start)
     # Tangkap error Exception — lanjutkan tanpa crash
@@ -379,8 +429,22 @@ def _gather_penjualan(today, month_start):
     pos_count = pos_qs.count()
     pos_revenue = float(pos_qs.aggregate(t=Sum('total_harga'))['t'] or 0)
 
-    total_revenue = so_revenue + pos_revenue
-    total_trx = so_count + pos_count
+    # Service Center bulan ini (order lunas)
+    sc_count = 0
+    sc_revenue = 0
+    try:
+        from apps.service_center.models import OrderService as SC_AIPenj
+        sc_qs = SC_AIPenj.objects.filter(
+            status_bayar='lunas',
+            tanggal_masuk__date__gte=month_start, tanggal_masuk__date__lte=today
+        )
+        sc_count = sc_qs.count()
+        sc_revenue = float(sc_qs.aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+    except Exception:
+        pass
+
+    total_revenue = so_revenue + pos_revenue + sc_revenue
+    total_trx = so_count + pos_count + sc_count
 
     # Bulan lalu untuk growth
     prev_month_end = month_start - timedelta(days=1)
@@ -395,7 +459,16 @@ def _gather_penjualan(today, month_start):
         status='paid',
         tanggal__date__gte=prev_month_start, tanggal__date__lte=prev_month_end
     ).aggregate(t=Sum('total_harga'))['t'] or 0)
-    prev_total = prev_so + prev_pos
+    # Service Center bulan lalu
+    prev_sc = 0
+    try:
+        prev_sc = float(SC_AIPenj.objects.filter(
+            status_bayar='lunas',
+            tanggal_masuk__date__gte=prev_month_start, tanggal_masuk__date__lte=prev_month_end
+        ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+    except Exception:
+        pass
+    prev_total = prev_so + prev_pos + prev_sc
     growth = round(((total_revenue - prev_total) / prev_total * 100), 1) if prev_total > 0 else 0
 
     # Top 5 produk terlaris bulan ini
@@ -430,6 +503,7 @@ def _gather_penjualan(today, month_start):
 - Total Transaksi: {total_trx} transaksi
 - Sales Order: {so_count} SO (Rp {so_revenue:,.0f})
 - Transaksi POS: {pos_count} POS (Rp {pos_revenue:,.0f})
+- Service Center: {sc_count} Order (Rp {sc_revenue:,.0f})
 - Growth vs bulan lalu: {'+' if growth >= 0 else ''}{growth}%
 - Omzet bulan lalu: Rp {prev_total:,.0f}
 
@@ -626,12 +700,31 @@ def _gather_keuntungan(today, month_start):
         transaction__status='paid'
     ).annotate(
         margin=ExpressionWrapper(
-            (F('harga_satuan') - F('produk__harga_beli')) * F('jumlah'),
+            (F('harga_satuan') - F('produk__harga_beli')) * F('jumlah_konversi'),
             output_field=DecimalField()
         )
     ).aggregate(t=Sum('margin'))['t'] or 0)
 
-    gross_profit = keuntungan_so + keuntungan_pos
+    # Keuntungan dari Service Center (revenue - COGS sparepart)
+    keuntungan_sc = 0
+    sc_revenue_total = 0
+    try:
+        from apps.service_center.models import OrderService as SC_AIProfit, PenggunaanSparepart as SC_SP_AIProfit
+        sc_revenue_total = float(SC_AIProfit.objects.filter(
+            status_bayar='lunas'
+        ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+        # COGS sparepart = sum(jumlah × harga_beli produk)
+        sc_cogs = 0
+        for sp in SC_SP_AIProfit.objects.select_related('produk').filter(
+            order_service__status_bayar='lunas'
+        ):
+            if sp.produk:
+                sc_cogs += float(sp.jumlah * sp.produk.harga_beli)
+        keuntungan_sc = sc_revenue_total - sc_cogs
+    except Exception:
+        pass
+
+    gross_profit = keuntungan_so + keuntungan_pos + keuntungan_sc
 
     # Total revenue
     revenue_so = float(SalesOrder.objects.filter(
@@ -641,7 +734,7 @@ def _gather_keuntungan(today, month_start):
     revenue_pos = float(POSTransaction.objects.filter(
         status='paid'
     ).aggregate(t=Sum('total_harga'))['t'] or 0)
-    total_revenue = revenue_so + revenue_pos
+    total_revenue = revenue_so + revenue_pos + sc_revenue_total
 
     # Total biaya
     total_biaya = float(TransaksiBiaya.objects.aggregate(t=Sum('jumlah'))['t'] or 0)
@@ -659,7 +752,8 @@ def _gather_keuntungan(today, month_start):
 
 Rincian Keuntungan:
 - Dari Sales Order: Rp {keuntungan_so:,.0f}
-- Dari POS: Rp {keuntungan_pos:,.0f}"""
+- Dari POS: Rp {keuntungan_pos:,.0f}
+- Dari Service Center: Rp {keuntungan_sc:,.0f}"""
 
     return {'intent': 'keuntungan', 'ringkasan': ringkasan}
 
@@ -973,6 +1067,13 @@ O. AI DASHBOARD (/ai/dashboard/):
    - Distribusi stok (habis/rendah/normal)
    - Insight dan rekomendasi otomatis
 
+P. MODUL KEUANGAN & AKUNTANSI:
+   - "Kas bank" → Saldo semua akun kas/bank, arus kas masuk/keluar
+   - "Akuntansi" / "Neraca" / "Laba rugi" → Data jurnal, neraca, laba rugi
+   - "Piutang" / "Hutang" → Status piutang/hutang, overdue, aging
+   - "Aset tetap" / "Penyusutan" → Daftar aset, nilai buku, akumulasi
+   - "Pajak" / "PPN" → Faktur pajak, rekap PPN keluaran/masukan, setor
+
 TIPS PENGGUNAAN:
 - Ketik dengan bahasa alami, AI akan memahami maksud Anda
 - Gunakan kata kunci seperti: penjualan, stok, keuntungan, biaya, customer
@@ -996,6 +1097,20 @@ def _gather_umum(today, month_start):
     # Import dari modul internal proyek
     from apps.hr.models import Karyawan
 
+    # Service Center stats
+    sc_order_count = 0
+    sc_pelanggan_count = 0
+    sc_revenue_total = 0
+    try:
+        from apps.service_center.models import OrderService as SC_AIUmum, Pelanggan as SC_Plg
+        sc_order_count = SC_AIUmum.objects.count()
+        sc_pelanggan_count = SC_Plg.objects.count()
+        sc_revenue_total = float(SC_AIUmum.objects.filter(
+            status_bayar='lunas'
+        ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+    except Exception:
+        pass
+
     ringkasan = f"""Ringkasan Umum Sistem ERP ({today.strftime('%d %B %Y')}):
 - Total Produk Aktif: {Produk.objects.filter(aktif=True).count()}
 - Total Gudang: {Gudang.objects.filter(aktif=True).count()}
@@ -1006,8 +1121,11 @@ def _gather_umum(today, month_start):
 - Transaksi POS: {POSTransaction.objects.filter(status='paid').count()}
 - Purchase Order: {PurchaseOrder.objects.exclude(status='cancelled').count()}
 - Total Biaya: Rp {float(TransaksiBiaya.objects.aggregate(t=Sum('jumlah'))['t'] or 0):,.0f}
+- Order Service: {sc_order_count}
+- Pelanggan Service: {sc_pelanggan_count}
+- Revenue Service Center: Rp {sc_revenue_total:,.0f}
 
-Sistem ini adalah ERP SERPTECH yang mengelola seluruh operasi bisnis: produk, inventory, penjualan, pembelian, biaya, HR, dan laporan keuangan."""
+Sistem ini adalah ERP SERPTECH + Service Center yang mengelola seluruh operasi bisnis: produk, inventory, penjualan, pembelian, biaya, HR, service center, sparepart, dan laporan keuangan."""
 
     return {'intent': 'umum', 'ringkasan': ringkasan}
 
@@ -1039,13 +1157,27 @@ def _gather_laporan_meeting(today, month_start):
     pos_rev = float(POSTransaction.objects.filter(
         status='paid', tanggal__date__gte=month_start, tanggal__date__lte=today
     ).aggregate(t=Sum('total_harga'))['t'] or 0)
-    total_rev = so_rev + pos_rev
+    # Service Center revenue bulan ini
+    sc_rev_meeting = 0
+    sc_trx_meeting = 0
+    try:
+        from apps.service_center.models import OrderService as SC_AIMeeting
+        sc_rev_meeting = float(SC_AIMeeting.objects.filter(
+            status_bayar='lunas',
+            tanggal_masuk__date__gte=month_start, tanggal_masuk__date__lte=today
+        ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+        sc_trx_meeting = SC_AIMeeting.objects.filter(
+            tanggal_masuk__date__gte=month_start, tanggal_masuk__date__lte=today
+        ).count()
+    except Exception:
+        pass
+    total_rev = so_rev + pos_rev + sc_rev_meeting
     # Query database — ambil data total_trx yang sesuai filter
     total_trx = SalesOrder.objects.filter(
         tanggal__date__gte=month_start, status__in=['confirmed', 'delivered', 'completed']
     ).count() + POSTransaction.objects.filter(
         status='paid', tanggal__date__gte=month_start
-    ).count()
+    ).count() + sc_trx_meeting
 
     # Bulan lalu
     prev_end = month_start - timedelta(days=1)
@@ -1213,7 +1345,7 @@ def _gather_swot(today, month_start):
         transaction__status='paid'
     ).annotate(
         margin=ExpressionWrapper(
-            (F('harga_satuan') - F('produk__harga_beli')) * F('jumlah'),
+            (F('harga_satuan') - F('produk__harga_beli')) * F('jumlah_konversi'),
             output_field=DecimalField()
         )
     ).aggregate(t=Sum('margin'))
@@ -2622,3 +2754,398 @@ Selisih Kas:
 - Status: {'🔴 Ada potensi kerugian' if shortage_count > 0 else '🟢 Tidak ada shortage'}"""
 
     return {'intent': 'fraud_detection', 'ringkasan': ringkasan}
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODUL KEUANGAN & AKUNTANSI — Data Gatherers
+# ═══════════════════════════════════════════════════════════════
+
+def _gather_kas_bank(today, month_start):
+    """Data Kas & Bank: saldo, mutasi, transfer."""
+    from apps.kas_bank.models import KasBankAccount, KasBankTransaction, KasBankTransfer
+
+    accounts = KasBankAccount.objects.filter(aktif=True)
+    total_accounts = accounts.count()
+
+    # Saldo per akun
+    account_info = []
+    total_saldo = Decimal('0')
+    for acc in accounts.order_by('kode')[:10]:
+        saldo = acc.saldo_terhitung
+        total_saldo += saldo
+        account_info.append(f"  - {acc.nama} ({acc.get_tipe_display()}): Rp {saldo:,.0f}")
+
+    # Mutasi bulan ini
+    mutasi_posted = KasBankTransaction.objects.filter(status='posted')
+    mutasi_bulan = mutasi_posted.filter(tanggal__date__gte=month_start, tanggal__date__lte=today)
+    total_masuk = float(mutasi_bulan.filter(
+        tipe__in=['masuk', 'transfer_masuk', 'penyesuaian_masuk']
+    ).aggregate(t=Sum('jumlah'))['t'] or 0)
+    total_keluar = float(mutasi_bulan.filter(
+        tipe__in=['keluar', 'transfer_keluar', 'penyesuaian_keluar']
+    ).aggregate(t=Sum('jumlah'))['t'] or 0)
+    net_cashflow = total_masuk - total_keluar
+
+    # Transfer bulan ini
+    transfer_count = KasBankTransfer.objects.filter(
+        status='posted', tanggal__date__gte=month_start
+    ).count()
+
+    # Pending reconciliation
+    from apps.kas_bank.models import KasBankReconciliation
+    pending_rekon = KasBankReconciliation.objects.filter(status='draft').count()
+
+    ringkasan = f"""═══ DATA KAS & BANK (Treasury) ═══
+Periode: {month_start.strftime('%d/%m/%Y')} s/d {today.strftime('%d/%m/%Y')}
+
+Ringkasan Saldo:
+- Total Akun Aktif: {total_accounts}
+- Total Saldo Semua Akun: Rp {total_saldo:,.0f}
+
+Detail Saldo per Akun:
+{chr(10).join(account_info) if account_info else '  Belum ada akun kas/bank'}
+
+Arus Kas Bulan Ini:
+- Total Kas Masuk: Rp {total_masuk:,.0f}
+- Total Kas Keluar: Rp {total_keluar:,.0f}
+- Net Cashflow: Rp {net_cashflow:,.0f} ({'surplus' if net_cashflow >= 0 else 'defisit'})
+
+Aktivitas:
+- Transfer Antar Akun: {transfer_count} transaksi
+- Rekonsiliasi Pending: {pending_rekon}"""
+
+    return {'intent': 'kas_bank', 'ringkasan': ringkasan}
+
+
+def _gather_akuntansi(today, month_start):
+    """Data Akuntansi: jurnal, neraca, laba rugi."""
+    from apps.akuntansi.models import Akun, JurnalEntry, JurnalLine, PeriodeAkuntansi
+    from apps.akuntansi.services import get_laba_rugi, get_neraca
+
+    # Statistik jurnal
+    total_jurnal = JurnalEntry.objects.count()
+    jurnal_posted = JurnalEntry.objects.filter(is_posted=True).count()
+    jurnal_draft = JurnalEntry.objects.filter(is_posted=False).count()
+    jurnal_bulan_ini = JurnalEntry.objects.filter(
+        tanggal__gte=month_start, tanggal__lte=today
+    ).count()
+
+    # Laba Rugi bulan ini
+    laba_rugi = get_laba_rugi(month_start, today)
+    pendapatan = float(laba_rugi['total_pendapatan'])
+    hpp = float(laba_rugi['total_hpp'])
+    beban = float(laba_rugi['total_beban'])
+    laba_kotor = float(laba_rugi['laba_kotor'])
+    laba_bersih = float(laba_rugi['laba_bersih'])
+
+    # Neraca saat ini
+    neraca = get_neraca(today)
+    total_aktiva = float(neraca['total_aktiva'])
+    total_pasiva = float(neraca['total_pasiva'])
+    is_balanced = neraca['is_balanced']
+
+    # Periode aktif
+    periode_aktif = PeriodeAkuntansi.objects.filter(is_aktif=True).first()
+    periode_info = f"{periode_aktif.nama}" if periode_aktif else "Tidak ada periode aktif"
+
+    # CoA
+    total_akun = Akun.objects.filter(is_active=True).count()
+
+    # Jurnal per sumber (top 5)
+    sumber_top = JurnalEntry.objects.filter(
+        is_posted=True, tanggal__gte=month_start
+    ).values('sumber').annotate(jml=Count('id')).order_by('-jml')[:5]
+    sumber_list = [f"  - {s['sumber'] or 'manual'}: {s['jml']} jurnal" for s in sumber_top]
+
+    ringkasan = f"""═══ DATA AKUNTANSI ═══
+Periode: {month_start.strftime('%d/%m/%Y')} s/d {today.strftime('%d/%m/%Y')}
+
+Statistik Jurnal:
+- Total Jurnal: {total_jurnal} (Posted: {jurnal_posted}, Draft: {jurnal_draft})
+- Jurnal Bulan Ini: {jurnal_bulan_ini}
+- Total Akun (CoA): {total_akun}
+- Periode Aktif: {periode_info}
+
+Laporan Laba Rugi (Bulan Ini):
+- Pendapatan: Rp {pendapatan:,.0f}
+- HPP: Rp {hpp:,.0f}
+- Laba Kotor: Rp {laba_kotor:,.0f}
+- Beban Operasional: Rp {beban:,.0f}
+- Laba Bersih: Rp {laba_bersih:,.0f}
+- Status: {'✅ LABA' if laba_bersih >= 0 else '❌ RUGI'}
+
+Neraca (Balance Sheet) per Hari Ini:
+- Total Aktiva (Aset): Rp {total_aktiva:,.0f}
+- Total Pasiva (Kewajiban + Modal + Laba): Rp {total_pasiva:,.0f}
+- Balance: {'✅ SEIMBANG' if is_balanced else '⚠️ TIDAK SEIMBANG'}
+
+Jurnal per Sumber (Bulan Ini):
+{chr(10).join(sumber_list) if sumber_list else '  Belum ada jurnal bulan ini'}"""
+
+    return {'intent': 'akuntansi', 'ringkasan': ringkasan}
+
+
+def _gather_piutang_hutang(today, month_start):
+    """Data Piutang & Hutang."""
+    from apps.piutang.models import Piutang
+    from apps.hutang.models import Hutang
+
+    # Piutang
+    piutang_all = Piutang.objects.exclude(status='lunas')
+    total_piutang = piutang_all.count()
+    nominal_piutang = float(piutang_all.aggregate(
+        t=Sum('jumlah_total'))['t'] or 0)
+    dibayar_piutang = float(piutang_all.aggregate(
+        t=Sum('jumlah_dibayar'))['t'] or 0)
+    sisa_piutang = nominal_piutang - dibayar_piutang
+
+    # Aging piutang
+    piutang_overdue = piutang_all.filter(
+        jatuh_tempo__lt=today, status='belum_bayar'
+    ).count()
+
+    # Hutang
+    hutang_all = Hutang.objects.exclude(status='lunas')
+    total_hutang = hutang_all.count()
+    nominal_hutang = float(hutang_all.aggregate(
+        t=Sum('jumlah_total'))['t'] or 0)
+    dibayar_hutang = float(hutang_all.aggregate(
+        t=Sum('jumlah_dibayar'))['t'] or 0)
+    sisa_hutang = nominal_hutang - dibayar_hutang
+
+    # Aging hutang
+    hutang_overdue = hutang_all.filter(
+        jatuh_tempo__lt=today, status='belum_bayar'
+    ).count()
+
+    ringkasan = f"""═══ DATA PIUTANG & HUTANG ═══
+
+PIUTANG USAHA (Accounts Receivable):
+- Total Piutang Belum Lunas: {total_piutang}
+- Nominal Total: Rp {nominal_piutang:,.0f}
+- Sudah Dibayar: Rp {dibayar_piutang:,.0f}
+- Sisa Piutang: Rp {sisa_piutang:,.0f}
+- Overdue (Lewat Jatuh Tempo): {piutang_overdue} piutang
+- Status: {'⚠️ Ada piutang overdue' if piutang_overdue > 0 else '✅ Semua dalam tempo'}
+
+HUTANG USAHA (Accounts Payable):
+- Total Hutang Belum Lunas: {total_hutang}
+- Nominal Total: Rp {nominal_hutang:,.0f}
+- Sudah Dibayar: Rp {dibayar_hutang:,.0f}
+- Sisa Hutang: Rp {sisa_hutang:,.0f}
+- Overdue (Lewat Jatuh Tempo): {hutang_overdue} hutang
+- Status: {'⚠️ Ada hutang overdue' if hutang_overdue > 0 else '✅ Semua dalam tempo'}
+
+POSISI BERSIH:
+- Net Position: Rp {(sisa_piutang - sisa_hutang):,.0f}
+- Keterangan: {'Piutang > Hutang (positif)' if sisa_piutang > sisa_hutang else 'Hutang > Piutang (negatif)'}"""
+
+    return {'intent': 'piutang_hutang', 'ringkasan': ringkasan}
+
+
+def _gather_aset_tetap():
+    """Data Aset Tetap & Penyusutan."""
+    from apps.aset.models import AsetTetap, Penyusutan
+
+    aset_aktif = AsetTetap.objects.filter(status='aktif')
+    total_aktif = aset_aktif.count()
+    total_perolehan = float(aset_aktif.aggregate(t=Sum('harga_perolehan'))['t'] or 0)
+    total_akumulasi = float(Penyusutan.objects.filter(
+        aset__status='aktif'
+    ).aggregate(t=Sum('jumlah'))['t'] or 0)
+    total_nilai_buku = total_perolehan - total_akumulasi
+
+    # Per kategori
+    kategori_info = []
+    for kat_code, kat_name in AsetTetap.KATEGORI_CHOICES:
+        count = aset_aktif.filter(kategori=kat_code).count()
+        if count > 0:
+            nilai = float(aset_aktif.filter(kategori=kat_code).aggregate(
+                t=Sum('harga_perolehan'))['t'] or 0)
+            kategori_info.append(f"  - {kat_name}: {count} unit (Rp {nilai:,.0f})")
+
+    # Aset yang sudah habis umur
+    habis_umur = 0
+    for aset in aset_aktif:
+        if aset.sisa_umur_bulan <= 0:
+            habis_umur += 1
+
+    # Disposed
+    total_disposed = AsetTetap.objects.exclude(status='aktif').count()
+
+    ringkasan = f"""═══ DATA ASET TETAP ═══
+
+Ringkasan:
+- Total Aset Aktif: {total_aktif}
+- Total Harga Perolehan: Rp {total_perolehan:,.0f}
+- Total Akumulasi Penyusutan: Rp {total_akumulasi:,.0f}
+- Total Nilai Buku: Rp {total_nilai_buku:,.0f}
+- Aset Habis Umur Ekonomis: {habis_umur}
+- Aset Disposed/Dijual: {total_disposed}
+
+Per Kategori:
+{chr(10).join(kategori_info) if kategori_info else '  Belum ada aset tetap'}
+
+Rasio:
+- Penyusutan vs Perolehan: {round(total_akumulasi / total_perolehan * 100, 1) if total_perolehan > 0 else 0}%"""
+
+    return {'intent': 'aset_tetap', 'ringkasan': ringkasan}
+
+
+def _gather_pajak_ppn(today, month_start):
+    """Data Pajak PPN."""
+    from apps.pajak.models import FakturPajak, SettingPajak, PembayaranPPN
+
+    # Setting PPN
+    setting = SettingPajak.get_setting()
+    tarif = float(setting.tarif_ppn) if setting else 11
+
+    # Faktur bulan ini
+    faktur_keluaran = FakturPajak.objects.filter(
+        tipe='keluaran', tanggal__gte=month_start, tanggal__lte=today
+    )
+    faktur_masukan = FakturPajak.objects.filter(
+        tipe='masukan', tanggal__gte=month_start, tanggal__lte=today
+    )
+
+    count_keluaran = faktur_keluaran.count()
+    count_masukan = faktur_masukan.count()
+    ppn_keluaran = float(faktur_keluaran.aggregate(t=Sum('ppn'))['t'] or 0)
+    ppn_masukan = float(faktur_masukan.aggregate(t=Sum('ppn'))['t'] or 0)
+    selisih_ppn = ppn_keluaran - ppn_masukan
+
+    # Total DPP
+    dpp_keluaran = float(faktur_keluaran.aggregate(t=Sum('dpp'))['t'] or 0)
+    dpp_masukan = float(faktur_masukan.aggregate(t=Sum('dpp'))['t'] or 0)
+
+    # Pembayaran PPN
+    total_setor = PembayaranPPN.objects.count()
+    total_nominal_setor = float(PembayaranPPN.objects.aggregate(
+        t=Sum('jumlah_setor'))['t'] or 0)
+
+    ringkasan = f"""═══ DATA PAJAK (PPN) ═══
+Periode: {month_start.strftime('%d/%m/%Y')} s/d {today.strftime('%d/%m/%Y')}
+Tarif PPN: {tarif}%
+
+Faktur Pajak Bulan Ini:
+- PPN Keluaran: {count_keluaran} faktur (DPP: Rp {dpp_keluaran:,.0f}, PPN: Rp {ppn_keluaran:,.0f})
+- PPN Masukan: {count_masukan} faktur (DPP: Rp {dpp_masukan:,.0f}, PPN: Rp {ppn_masukan:,.0f})
+
+Rekap PPN:
+- PPN Keluaran (harus disetor): Rp {ppn_keluaran:,.0f}
+- PPN Masukan (kredit pajak): Rp {ppn_masukan:,.0f}
+- Selisih (Kurang/Lebih Bayar): Rp {selisih_ppn:,.0f}
+- Status: {'Kurang Bayar → Harus Setor' if selisih_ppn > 0 else 'Lebih Bayar → Restitusi' if selisih_ppn < 0 else 'Nihil'}
+
+Riwayat Setor PPN:
+- Total Setor: {total_setor} kali
+- Total Nominal Disetor: Rp {total_nominal_setor:,.0f}"""
+
+    return {'intent': 'pajak_ppn', 'ringkasan': ringkasan}
+
+
+def _gather_service_center(today, month_start):
+    """Data service center: order, revenue, status, teknisi, sparepart."""
+    from apps.service_center.models import (
+        OrderService, ItemService, PenggunaanSparepart,
+        Pelanggan, Perangkat, KategoriService, JenisService
+    )
+
+    # === Order stats ===
+    total_order = OrderService.objects.count()
+    order_bulan_ini = OrderService.objects.filter(
+        tanggal_masuk__date__gte=month_start, tanggal_masuk__date__lte=today
+    ).count()
+
+    # Status breakdown
+    status_counts = []
+    for code, label in OrderService.STATUS_CHOICES:
+        count = OrderService.objects.filter(status=code).count()
+        if count > 0:
+            status_counts.append(f"- {label}: {count}")
+
+    # Revenue
+    revenue_total = float(OrderService.objects.filter(
+        status_bayar='lunas'
+    ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+
+    revenue_bulan_ini = float(OrderService.objects.filter(
+        status_bayar='lunas',
+        tanggal_masuk__date__gte=month_start, tanggal_masuk__date__lte=today
+    ).aggregate(t=Sum('biaya_akhir'))['t'] or 0)
+
+    # Pending payment
+    pending_bayar = OrderService.objects.filter(
+        status_bayar__in=['belum_bayar', 'dp']
+    ).exclude(status='dibatalkan').count()
+
+    # Order by priority
+    urgent_count = OrderService.objects.filter(
+        prioritas__in=['urgent', 'express']
+    ).exclude(status__in=['selesai', 'diambil', 'dibatalkan']).count()
+
+    # Sparepart usage
+    total_sparepart_used = PenggunaanSparepart.objects.count()
+    sparepart_cost = float(PenggunaanSparepart.objects.aggregate(
+        total=Sum(
+            ExpressionWrapper(
+                F('jumlah') * F('harga_satuan'),
+                output_field=DecimalField()
+            )
+        )
+    )['total'] or 0)
+
+    # Master data stats
+    total_pelanggan = Pelanggan.objects.filter(aktif=True).count()
+    total_perangkat = Perangkat.objects.filter(aktif=True).count()
+    total_kategori = KategoriService.objects.filter(aktif=True).count()
+    total_jenis = JenisService.objects.filter(aktif=True).count()
+
+    # Top 5 teknisi
+    top_teknisi = OrderService.objects.filter(
+        teknisi__isnull=False,
+        status__in=['selesai', 'diambil']
+    ).values(
+        'teknisi__username', 'teknisi__first_name'
+    ).annotate(
+        total=Count('id')
+    ).order_by('-total')[:5]
+    teknisi_list = [
+        f"- {t['teknisi__first_name'] or t['teknisi__username']}: {t['total']} order"
+        for t in top_teknisi
+    ]
+
+    # Top 5 perangkat
+    top_perangkat = OrderService.objects.values(
+        'jenis_perangkat__nama'
+    ).annotate(total=Count('id')).order_by('-total')[:5]
+    perangkat_list = [f"- {p['jenis_perangkat__nama']}: {p['total']} order" for p in top_perangkat]
+
+    ringkasan = f"""Data Service Center:
+- Total Order Service: {total_order}
+- Order Bulan Ini: {order_bulan_ini}
+- Revenue Total (Lunas): Rp {revenue_total:,.0f}
+- Revenue Bulan Ini: Rp {revenue_bulan_ini:,.0f}
+- Pending Pembayaran: {pending_bayar} order
+- Order Urgent/Express Aktif: {urgent_count}
+
+Master Data:
+- Total Pelanggan: {total_pelanggan}
+- Jenis Perangkat: {total_perangkat}
+- Kategori Service: {total_kategori}
+- Jenis Layanan: {total_jenis}
+
+Status Order:
+{chr(10).join(status_counts) if status_counts else '- Belum ada data'}
+
+Sparepart:
+- Total Penggunaan: {total_sparepart_used} record
+- Total Harga Sparepart: Rp {sparepart_cost:,.0f}
+
+Top Teknisi:
+{chr(10).join(teknisi_list) if teknisi_list else '- Belum ada data'}
+
+Top Perangkat:
+{chr(10).join(perangkat_list) if perangkat_list else '- Belum ada data'}"""
+
+    return {'intent': 'service_center', 'ringkasan': ringkasan}

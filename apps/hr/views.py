@@ -50,6 +50,7 @@ PENGATURAN ABSENSI:
 # Import dari framework Django
 from django.shortcuts import render
 from django.db.models import ProtectedError
+from django.db import transaction
 from django.shortcuts import redirect, get_object_or_404
 # Import dari framework Django
 from django.contrib.auth.decorators import login_required
@@ -63,6 +64,9 @@ from django.contrib import messages
 from django.utils.decorators import method_decorator
 # Import dari framework Django
 from django.http import JsonResponse
+# Import decorator untuk izin iframe embedding (peta lokasi)
+from django.views.decorators.clickjacking import xframe_options_exempt
+from django.views.decorators.http import require_http_methods
 # Import dari framework Django
 from django.db.models import Sum, Count, Avg, F
 # Import dari framework Django
@@ -71,6 +75,20 @@ from datetime import datetime, timedelta, date
 from decimal import Decimal
 import base64
 from io import BytesIO
+
+# Geolocation Maps — untuk rendering peta lokasi absensi
+try:
+    import folium
+    FOLIUM_ENABLED = True
+except ImportError:
+    FOLIUM_ENABLED = False
+
+# Geolocation Distance — untuk menghitung jarak GPS dari kantor
+try:
+    from geopy.distance import geodesic
+    GEOLOCATION_ENABLED = True
+except ImportError:
+    GEOLOCATION_ENABLED = False
 
 from web_project import TemplateLayout
 # Import dari modul internal proyek
@@ -83,6 +101,124 @@ from apps.hr.forms import (
 )
 # Import dari modul internal proyek
 from apps.core.mixins import ReadPermissionMixin, CreatePermissionMixin, UpdatePermissionMixin, DeletePermissionMixin, SubModulePermissionMixin
+from apps.core.permissions import has_permission
+
+
+def get_default_payroll_payment_method():
+    """Return metode pembayaran kas default untuk payroll jika slip belum memilih metode."""
+    from apps.pos.models import MetodePembayaran
+
+    return (
+        MetodePembayaran.objects.filter(aktif=True, akun_kas_bank__kode='1-1000')
+        .order_by('kode')
+        .first()
+        or MetodePembayaran.objects.filter(aktif=True).order_by('kode').first()
+    )
+
+
+def create_penggajian_payment_journal(slip, user=None):
+    """Buat jurnal payroll dan mutasi Kas/Bank untuk slip yang sudah dibayar."""
+    if slip.status != 'dibayar':
+        return None
+
+    update_fields = []
+    if not slip.tanggal_bayar:
+        slip.tanggal_bayar = timezone.now().date()
+        update_fields.append('tanggal_bayar')
+    if not slip.cabang_id and slip.karyawan_id:
+        slip.cabang = slip.karyawan.cabang
+        update_fields.append('cabang')
+    if not slip.metode_pembayaran_id:
+        slip.metode_pembayaran = get_default_payroll_payment_method()
+        if slip.metode_pembayaran_id:
+            update_fields.append('metode_pembayaran')
+    if update_fields:
+        update_fields.append('diupdate_pada')
+        slip.save(update_fields=update_fields)
+
+    from apps.akuntansi.models import JurnalEntry
+
+    existing_jurnal = JurnalEntry.objects.filter(
+        sumber__in=['payroll', 'hr'],
+        sumber_id=slip.pk,
+    ).first()
+    if existing_jurnal:
+        return existing_jurnal
+
+    if slip.total_pendapatan <= 0:
+        return None
+
+    from apps.akuntansi.services import create_jurnal
+    from apps.kas_bank.services import create_operational_mutation, resolve_kas_bank_mapping
+
+    kas_bank_account, _, kas_akun_kode = resolve_kas_bank_mapping(slip.metode_pembayaran)
+    cabang = slip.cabang or (slip.karyawan.cabang if slip.karyawan_id else None)
+    bpjs_total = slip.potongan_bpjs_kesehatan + slip.potongan_bpjs_ketenagakerjaan
+    lines_data = [
+        {
+            'akun_kode': '6-1000',
+            'debit': slip.total_pendapatan,
+            'kredit': Decimal('0'),
+            'keterangan': f'Beban gaji {slip.karyawan.nama} - {slip.periode}',
+        }
+    ]
+    if slip.gaji_bersih > 0:
+        lines_data.append({
+            'akun_kode': kas_akun_kode,
+            'debit': Decimal('0'),
+            'kredit': slip.gaji_bersih,
+            'keterangan': f'Pembayaran gaji bersih {slip.karyawan.nama}',
+        })
+    if slip.potongan_pph21 > 0:
+        lines_data.append({
+            'akun_kode': '2-3100',
+            'debit': Decimal('0'),
+            'kredit': slip.potongan_pph21,
+            'keterangan': f'Hutang PPh 21 {slip.karyawan.nama}',
+        })
+    if bpjs_total > 0:
+        lines_data.append({
+            'akun_kode': '2-3200',
+            'debit': Decimal('0'),
+            'kredit': bpjs_total,
+            'keterangan': f'Hutang BPJS {slip.karyawan.nama}',
+        })
+    if slip.potongan_lainnya > 0:
+        lines_data.append({
+            'akun_kode': '2-3000',
+            'debit': Decimal('0'),
+            'kredit': slip.potongan_lainnya,
+            'keterangan': f'Potongan lain gaji {slip.karyawan.nama}',
+        })
+
+    jurnal = create_jurnal(
+        tanggal=slip.tanggal_bayar,
+        deskripsi=f'Pembayaran gaji {slip.karyawan.nama} - {slip.periode}',
+        lines_data=lines_data,
+        sumber='payroll',
+        sumber_id=slip.pk,
+        sumber_ref=f'PAY-{slip.pk}',
+        cabang=cabang,
+        user=user or slip.dibuat_oleh,
+        auto_post=True,
+    )
+
+    create_operational_mutation(
+        akun_kas_bank=kas_bank_account,
+        tipe='keluar',
+        tanggal=slip.tanggal_bayar,
+        jumlah=slip.gaji_bersih,
+        deskripsi=f'Pembayaran gaji {slip.karyawan.nama} - {slip.periode}',
+        cabang=cabang,
+        metode_pembayaran=slip.metode_pembayaran,
+        sumber_app='hr',
+        sumber_model='Penggajian',
+        sumber_id=slip.pk,
+        sumber_ref=f'PAY-{slip.pk}',
+        jurnal_entry=jurnal,
+        user=user or slip.dibuat_oleh,
+    )
+    return jurnal
 
 
 
@@ -798,6 +934,8 @@ class AbsensiDeteksiWajahView(ReadPermissionMixin, TemplateView):
         context['today'] = timezone.now().date()  # Tanggal hari ini
         # Data konteks: now - untuk ditampilkan di template
         context['now'] = timezone.now()           # Waktu saat ini (untuk tampilan jam)
+        # Data konteks: pengaturan - pengaturan absensi aktif (untuk lokasi kantor & radius)
+        context['pengaturan'] = PengaturanAbsensi.get_active()
         return context
 
 
@@ -808,20 +946,27 @@ def absensi_clock_in(request):
     API endpoint untuk melakukan Clock In karyawan.
 
     URL: /hr/absensi/clock-in/  (POST only)
-    Input: karyawan_id (POST), foto (FILES, opsional)
-    Response: JSON {success, message}
+    Input: karyawan_id (POST), foto (FILES, opsional), latitude, longitude (POST, opsional)
+    Response: JSON {success, message, jarak, lokasi_valid}
 
     Alur kerja:
     1. Cari karyawan berdasarkan ID
     2. Cek apakah sudah clock in hari ini (get_or_create)
     3. Jika belum → buat record absensi baru
+        - Hitung jarak dari kantor via Geopy (jika GPS tersedia)
+        - Validasi radius (jika wajib_lokasi aktif)
         - Jam masuk < 09:00 → status 'hadir'
         - Jam masuk >= 09:00 → status 'terlambat'
     4. Jika sudah → return error (tidak boleh clock in 2x)
     """
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'create', 'hr', 'absensi'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk membuat data absensi.'}, status=403)
+
         karyawan_id = request.POST.get('karyawan_id')  # ID karyawan dari form
         foto = request.FILES.get('foto')                # Foto opsional (selfie saat clock in)
+        latitude = request.POST.get('latitude')          # Latitude GPS dari device
+        longitude = request.POST.get('longitude')        # Longitude GPS dari device
 
         # Blok penanganan error - coba jalankan kode di bawah
         try:
@@ -830,16 +975,59 @@ def absensi_clock_in(request):
             today = timezone.now().date()   # Tanggal hari ini
             now = timezone.now().time()     # Jam saat ini
 
+            # === GPS LOCATION TRACKING ===
+            lokasi_masuk_str = None
+            jarak_masuk_val = None
+            lokasi_valid = True  # Default: valid (jika GPS tidak dikirim)
+
+            if latitude and longitude and GEOLOCATION_ENABLED:
+                try:
+                    lat = float(latitude)
+                    lng = float(longitude)
+                    lokasi_masuk_str = f"{lat},{lng}"
+
+                    # Hitung jarak dari kantor menggunakan Geopy
+                    pengaturan = PengaturanAbsensi.get_active(cabang=karyawan.cabang)
+                    if pengaturan and pengaturan.latitude and pengaturan.longitude:
+                        kantor = (float(pengaturan.latitude), float(pengaturan.longitude))
+                        karyawan_pos = (lat, lng)
+                        jarak_masuk_val = round(geodesic(kantor, karyawan_pos).meters, 1)
+
+                        # Validasi radius jika wajib_lokasi aktif
+                        if pengaturan.wajib_lokasi and jarak_masuk_val > pengaturan.radius_lokasi:
+                            lokasi_valid = False
+                            return JsonResponse({
+                                'success': False,
+                                'message': f'Lokasi Anda di luar radius kantor ({jarak_masuk_val:.0f}m dari kantor, batas: {pengaturan.radius_lokasi}m). Silakan absen dari lokasi yang lebih dekat.',
+                                'jarak': jarak_masuk_val,
+                                'lokasi_valid': False
+                            })
+                except (ValueError, TypeError):
+                    pass  # GPS data invalid, lanjutkan tanpa lokasi
+
+            # Tentukan status berdasarkan pengaturan absensi
+            pengaturan = PengaturanAbsensi.get_active(cabang=karyawan.cabang)
+            if pengaturan:
+                batas_terlambat = pengaturan.jam_masuk
+                # Tambah toleransi
+                from datetime import datetime as dt_cls, timedelta as td_cls
+                batas_waktu = (dt_cls.combine(today, batas_terlambat) + td_cls(minutes=pengaturan.toleransi_terlambat)).time()
+                status_absen = 'hadir' if now <= batas_waktu else 'terlambat'
+            else:
+                status_absen = 'hadir' if now.hour < 9 else 'terlambat'
+
             # get_or_create() = cari record, jika tidak ada maka buat baru
-            # Lookup: karyawan + tanggal hari ini
-            # defaults: nilai yang diset HANYA jika record BARU dibuat
             absensi, created = Absensi.objects.get_or_create(
                 karyawan=karyawan,
                 tanggal=today,
                 defaults={
                     'jam_masuk': now,
-                    'status': 'hadir' if now.hour < 9 else 'terlambat',  # Jam 9 = batas tepat waktu
-                    'foto_masuk': foto  # Simpan foto selfie (jika ada)
+                    'status': status_absen,
+                    'foto_masuk': foto,
+                    'lokasi_masuk': lokasi_masuk_str,
+                    'jarak_masuk': jarak_masuk_val,
+                    'cabang': karyawan.cabang,
+                    'pengaturan_snapshot': pengaturan,
                 }
             )
 
@@ -850,11 +1038,17 @@ def absensi_clock_in(request):
                     'message': f'{karyawan.nama} sudah melakukan clock in hari ini'
                 })
 
-            # Berhasil clock in - return success dengan nama dan jam
-            return JsonResponse({
+            # Berhasil clock in - return success dengan info lokasi
+            response_data = {
                 'success': True,
                 'message': f'Clock In berhasil untuk {karyawan.nama} pada {now.strftime("%H:%M")}'
-            })
+            }
+            if jarak_masuk_val is not None:
+                response_data['message'] += f' (Jarak: {jarak_masuk_val:.0f}m dari kantor)'
+                response_data['jarak'] = jarak_masuk_val
+                response_data['lokasi_valid'] = lokasi_valid
+
+            return JsonResponse(response_data)
 
         # Tangkap error Karyawan.DoesNotExist - lanjutkan tanpa crash
         except Karyawan.DoesNotExist:
@@ -878,19 +1072,24 @@ def absensi_clock_out(request):
     API endpoint untuk melakukan Clock Out karyawan.
 
     URL: /hr/absensi/clock-out/  (POST only)
-    Input: karyawan_id (POST), foto (FILES, opsional)
-    Response: JSON {success, message}
+    Input: karyawan_id (POST), foto (FILES, opsional), latitude, longitude (POST, opsional)
+    Response: JSON {success, message, jarak}
 
     Alur kerja:
     1. Cari karyawan berdasarkan ID
     2. Cari record absensi hari ini (harus sudah clock in)
     3. Cek apakah sudah clock out (jam_keluar sudah terisi)
-    4. Jika belum → isi jam_keluar dan simpan
+    4. Jika belum → isi jam_keluar, lokasi_keluar, jarak_keluar dan simpan
     5. Jika sudah → return error (tidak boleh clock out 2x)
     """
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'update', 'hr', 'absensi'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mengubah data absensi.'}, status=403)
+
         karyawan_id = request.POST.get('karyawan_id')  # ID karyawan dari form
         foto = request.FILES.get('foto')                # Foto opsional (selfie saat clock out)
+        latitude = request.POST.get('latitude')          # Latitude GPS dari device
+        longitude = request.POST.get('longitude')        # Longitude GPS dari device
 
         # Blok penanganan error - coba jalankan kode di bawah
         try:
@@ -898,6 +1097,25 @@ def absensi_clock_out(request):
             karyawan = Karyawan.objects.get(pk=karyawan_id, aktif=True)
             today = timezone.now().date()
             now = timezone.now().time()
+
+            # === GPS LOCATION TRACKING ===
+            lokasi_keluar_str = None
+            jarak_keluar_val = None
+
+            if latitude and longitude and GEOLOCATION_ENABLED:
+                try:
+                    lat = float(latitude)
+                    lng = float(longitude)
+                    lokasi_keluar_str = f"{lat},{lng}"
+
+                    # Hitung jarak dari kantor menggunakan Geopy
+                    pengaturan = PengaturanAbsensi.get_active(cabang=karyawan.cabang)
+                    if pengaturan and pengaturan.latitude and pengaturan.longitude:
+                        kantor = (float(pengaturan.latitude), float(pengaturan.longitude))
+                        karyawan_pos = (lat, lng)
+                        jarak_keluar_val = round(geodesic(kantor, karyawan_pos).meters, 1)
+                except (ValueError, TypeError):
+                    pass  # GPS data invalid, lanjutkan tanpa lokasi
 
             # Cari record absensi hari ini - harus sudah clock in
             try:
@@ -911,15 +1129,22 @@ def absensi_clock_out(request):
                         'message': f'{karyawan.nama} sudah melakukan clock out hari ini'
                     })
 
-                # Isi jam keluar dan foto, lalu simpan
-                absensi.jam_keluar = now          # Set jam keluar = waktu sekarang
-                absensi.foto_keluar = foto        # Simpan foto clock out
-                absensi.save()                    # Update ke database
+                # Isi jam keluar, foto, lokasi, dan jarak, lalu simpan
+                absensi.jam_keluar = now                    # Set jam keluar = waktu sekarang
+                absensi.foto_keluar = foto                  # Simpan foto clock out
+                absensi.lokasi_keluar = lokasi_keluar_str   # Simpan lokasi GPS keluar
+                absensi.jarak_keluar = jarak_keluar_val     # Simpan jarak dari kantor
+                absensi.save()                              # Update ke database
 
-                return JsonResponse({
+                response_data = {
                     'success': True,
                     'message': f'Clock Out berhasil untuk {karyawan.nama} pada {now.strftime("%H:%M")}'
-                })
+                }
+                if jarak_keluar_val is not None:
+                    response_data['message'] += f' (Jarak: {jarak_keluar_val:.0f}m dari kantor)'
+                    response_data['jarak'] = jarak_keluar_val
+
+                return JsonResponse(response_data)
 
             # Tangkap error Absensi.DoesNotExist - lanjutkan tanpa crash
             except Absensi.DoesNotExist:
@@ -942,6 +1167,206 @@ def absensi_clock_out(request):
 
     # Hanya menerima method POST
     return JsonResponse({'success': False, 'message': 'Method not allowed'}, status=405)
+
+
+@login_required
+@xframe_options_exempt
+def absensi_lokasi_map(request, pk):
+    """
+    API endpoint untuk generate peta Folium dari lokasi absensi karyawan.
+
+    URL: /hr/absensi/<pk>/lokasi-map/
+    Response: Standalone HTML page — peta Folium atau empty state jika tidak ada GPS data
+    """
+    from django.http import HttpResponse
+
+    try:
+        absensi = Absensi.objects.select_related('karyawan').get(pk=pk)
+    except Absensi.DoesNotExist:
+        return HttpResponse(_map_empty_html('Data absensi tidak ditemukan'), content_type='text/html')
+
+    # Jika tidak ada data lokasi GPS sama sekali → tampilkan empty state
+    if not absensi.lokasi_masuk and not absensi.lokasi_keluar:
+        return HttpResponse(_map_empty_html(
+            'Data lokasi GPS belum tersedia',
+            'Lokasi akan terekam otomatis saat karyawan melakukan absensi via Deteksi Wajah.'
+        ), content_type='text/html')
+
+    if not FOLIUM_ENABLED:
+        return HttpResponse(_map_empty_html(
+            'Library Folium tidak terinstall',
+            'Silakan install folium: pip install folium'
+        ), content_type='text/html')
+
+    # Tentukan center peta — prioritas: lokasi masuk > lokasi kantor > default Jakarta
+    pengaturan = PengaturanAbsensi.get_active(cabang=absensi.cabang)
+    center_lat, center_lng = -6.2088, 106.8456  # Default: Jakarta
+
+    if pengaturan and pengaturan.latitude and pengaturan.longitude:
+        center_lat = float(pengaturan.latitude)
+        center_lng = float(pengaturan.longitude)
+
+    # Buat peta Folium
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=16, tiles='OpenStreetMap')
+
+    # Marker lokasi kantor (jika ada pengaturan)
+    if pengaturan and pengaturan.latitude and pengaturan.longitude:
+        folium.Marker(
+            [float(pengaturan.latitude), float(pengaturan.longitude)],
+            popup=f'<b>Kantor</b><br>{pengaturan.nama_lokasi or "Lokasi Kantor"}',
+            icon=folium.Icon(color='blue', icon='building', prefix='fa'),
+            tooltip='Lokasi Kantor'
+        ).add_to(m)
+
+        # Lingkaran radius kantor
+        folium.Circle(
+            [float(pengaturan.latitude), float(pengaturan.longitude)],
+            radius=pengaturan.radius_lokasi,
+            color='blue',
+            fill=True,
+            fill_opacity=0.1,
+            popup=f'Radius Absensi: {pengaturan.radius_lokasi}m'
+        ).add_to(m)
+
+    # Marker lokasi masuk (jika ada)
+    if absensi.lokasi_masuk:
+        try:
+            lat, lng = [float(x) for x in absensi.lokasi_masuk.split(',')]
+            jarak_text = f'<br>Jarak: {absensi.jarak_masuk:.0f}m' if absensi.jarak_masuk else ''
+            folium.Marker(
+                [lat, lng],
+                popup=f'<b>Clock In</b><br>{absensi.karyawan.nama}<br>{absensi.jam_masuk.strftime("%H:%M") if absensi.jam_masuk else "-"}{jarak_text}',
+                icon=folium.Icon(color='green', icon='sign-in', prefix='fa'),
+                tooltip=f'Clock In - {absensi.karyawan.nama}'
+            ).add_to(m)
+            center_lat, center_lng = lat, lng
+        except (ValueError, AttributeError):
+            pass
+
+    # Marker lokasi keluar (jika ada)
+    if absensi.lokasi_keluar:
+        try:
+            lat, lng = [float(x) for x in absensi.lokasi_keluar.split(',')]
+            jarak_text = f'<br>Jarak: {absensi.jarak_keluar:.0f}m' if absensi.jarak_keluar else ''
+            folium.Marker(
+                [lat, lng],
+                popup=f'<b>Clock Out</b><br>{absensi.karyawan.nama}<br>{absensi.jam_keluar.strftime("%H:%M") if absensi.jam_keluar else "-"}{jarak_text}',
+                icon=folium.Icon(color='red', icon='sign-out', prefix='fa'),
+                tooltip=f'Clock Out - {absensi.karyawan.nama}'
+            ).add_to(m)
+        except (ValueError, AttributeError):
+            pass
+
+    # Refit center peta
+    m.location = [center_lat, center_lng]
+
+    return HttpResponse(m._repr_html_(), content_type='text/html')
+
+
+def _map_empty_html(title, subtitle=''):
+    """Helper: Generate styled empty state HTML untuk iframe peta."""
+    return f'''<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body {{ margin:0; display:flex; align-items:center; justify-content:center; height:100vh;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:#f5f5f9; color:#697a8d; text-align:center; }}
+.empty {{ padding:2rem; }}
+.empty svg {{ width:64px; height:64px; fill:#a1acb8; margin-bottom:1rem; }}
+.empty h5 {{ color:#566a7f; margin:0 0 0.5rem; font-size:1.1rem; }}
+.empty p {{ margin:0; font-size:0.875rem; color:#a1acb8; }}
+</style></head><body>
+<div class="empty">
+  <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 6.5 12 6.5s2.5 1.12 2.5 2.5S13.38 11.5 12 11.5z"/></svg>
+  <h5>{title}</h5>
+  {"<p>" + subtitle + "</p>" if subtitle else ""}
+</div>
+</body></html>'''
+
+
+class AbsensiDetailView(ReadPermissionMixin, DetailView):
+    """
+    Halaman detail absensi - menampilkan data lengkap + peta lokasi.
+
+    URL: /hr/absensi/<pk>/detail/
+    Permission: hr.read
+    Template: hr/absensi_detail.html
+
+    Context tambahan:
+    - peta_html: Peta Folium (HTML string) dengan lokasi masuk/keluar
+    - pengaturan: PengaturanAbsensi aktif (jam kerja, lokasi, radius, dll)
+    """
+    model = Absensi
+    template_name = 'hr/absensi_detail.html'
+    context_object_name = 'absensi'
+    permission_module = 'hr'
+
+    def get_context_data(self, **kwargs):
+        """Menambahkan peta Folium dan pengaturan absensi ke context."""
+        context = TemplateLayout.init(self, super().get_context_data(**kwargs))
+        absensi = self.object
+        pengaturan = PengaturanAbsensi.get_active(cabang=absensi.cabang)
+        context['pengaturan'] = pengaturan
+
+        # Generate peta Folium jika ada data lokasi dan Folium terinstall
+        if FOLIUM_ENABLED and (absensi.lokasi_masuk or absensi.lokasi_keluar):
+            center_lat, center_lng = -6.2088, 106.8456
+
+            if pengaturan and pengaturan.latitude and pengaturan.longitude:
+                center_lat = float(pengaturan.latitude)
+                center_lng = float(pengaturan.longitude)
+
+            m = folium.Map(location=[center_lat, center_lng], zoom_start=16, tiles='OpenStreetMap')
+
+            # Marker lokasi kantor
+            if pengaturan and pengaturan.latitude and pengaturan.longitude:
+                folium.Marker(
+                    [float(pengaturan.latitude), float(pengaturan.longitude)],
+                    popup=f'<b>Kantor</b><br>{pengaturan.nama_lokasi or "Lokasi Kantor"}',
+                    icon=folium.Icon(color='blue', icon='building', prefix='fa'),
+                    tooltip='Lokasi Kantor'
+                ).add_to(m)
+                folium.Circle(
+                    [float(pengaturan.latitude), float(pengaturan.longitude)],
+                    radius=pengaturan.radius_lokasi,
+                    color='blue', fill=True, fill_opacity=0.1,
+                    popup=f'Radius: {pengaturan.radius_lokasi}m'
+                ).add_to(m)
+
+            # Marker lokasi masuk
+            if absensi.lokasi_masuk:
+                try:
+                    lat, lng = [float(x) for x in absensi.lokasi_masuk.split(',')]
+                    jarak_text = f'<br>Jarak: {absensi.jarak_masuk:.0f}m' if absensi.jarak_masuk else ''
+                    folium.Marker(
+                        [lat, lng],
+                        popup=f'<b>Clock In</b><br>{absensi.karyawan.nama}<br>{absensi.jam_masuk.strftime("%H:%M") if absensi.jam_masuk else "-"}{jarak_text}',
+                        icon=folium.Icon(color='green', icon='sign-in', prefix='fa'),
+                        tooltip=f'Clock In - {absensi.karyawan.nama}'
+                    ).add_to(m)
+                    center_lat, center_lng = lat, lng
+                except (ValueError, AttributeError):
+                    pass
+
+            # Marker lokasi keluar
+            if absensi.lokasi_keluar:
+                try:
+                    lat, lng = [float(x) for x in absensi.lokasi_keluar.split(',')]
+                    jarak_text = f'<br>Jarak: {absensi.jarak_keluar:.0f}m' if absensi.jarak_keluar else ''
+                    folium.Marker(
+                        [lat, lng],
+                        popup=f'<b>Clock Out</b><br>{absensi.karyawan.nama}<br>{absensi.jam_keluar.strftime("%H:%M") if absensi.jam_keluar else "-"}{jarak_text}',
+                        icon=folium.Icon(color='red', icon='sign-out', prefix='fa'),
+                        tooltip=f'Clock Out - {absensi.karyawan.nama}'
+                    ).add_to(m)
+                except (ValueError, AttributeError):
+                    pass
+
+            m.location = [center_lat, center_lng]
+            context['peta_html'] = m._repr_html_()
+        else:
+            context['peta_html'] = None
+
+        return context
 
 
 
@@ -1293,46 +1718,52 @@ class GeneratePenggajianView(CreatePermissionMixin, TemplateView):
             tahun = int(form.cleaned_data['periode_tahun'])           # Tahun (YYYY)
             tunjangan_makan = form.cleaned_data['tunjangan_makan']       # Tunjangan makan per bulan
             tunjangan_transport = form.cleaned_data['tunjangan_transport'] # Tunjangan transport per bulan
+            metode_pembayaran = form.cleaned_data.get('metode_pembayaran') or get_default_payroll_payment_method()
 
             # Ambil semua karyawan aktif untuk dibuatkan slip
             karyawan_list = Karyawan.objects.filter(aktif=True, status='aktif')
             created_count = 0   # Counter slip yang berhasil dibuat
             skipped_count = 0   # Counter slip yang dilewati (sudah ada)
+            created_slips = []
 
-            for karyawan in karyawan_list:
-                # Cek apakah slip sudah ada untuk karyawan + periode ini
-                exists = Penggajian.objects.filter(
-                    karyawan=karyawan,
-                    periode_bulan=bulan,
-                    periode_tahun=tahun
-                ).exists()
+            with transaction.atomic():
+                for karyawan in karyawan_list.select_for_update():
+                    # Cek apakah slip sudah ada untuk karyawan + periode ini
+                    exists = Penggajian.objects.filter(
+                        karyawan=karyawan,
+                        periode_bulan=bulan,
+                        periode_tahun=tahun
+                    ).exists()
 
-                if exists:
-                    skipped_count += 1  # Lewati, jangan buat duplikat
-                    continue
+                    if exists:
+                        skipped_count += 1  # Lewati, jangan buat duplikat
+                        continue
 
-                # Buat slip gaji baru
-                # gaji_pokok: prioritas dari karyawan, fallback ke jabatan
-                # tunjangan_jabatan: dari jabatan karyawan (jika ada)
-                slip_baru = Penggajian.objects.create(
-                    karyawan=karyawan,
-                    periode_bulan=bulan,
-                    periode_tahun=tahun,
-                    gaji_pokok=karyawan.gaji_pokok or karyawan.jabatan.gaji_pokok,
-                    tunjangan_jabatan=karyawan.jabatan.tunjangan_jabatan if karyawan.jabatan else 0,
-                    tunjangan_makan=tunjangan_makan,
-                    tunjangan_transport=tunjangan_transport,
-                    dibuat_oleh=request.user  # User yang menjalankan generate
-                )
-                
+                    # Buat slip gaji baru
+                    # gaji_pokok: prioritas dari karyawan, fallback ke jabatan
+                    # tunjangan_jabatan: dari jabatan karyawan (jika ada)
+                    slip_baru = Penggajian.objects.create(
+                        karyawan=karyawan,
+                        periode_bulan=bulan,
+                        periode_tahun=tahun,
+                        gaji_pokok=karyawan.gaji_pokok or karyawan.jabatan.gaji_pokok,
+                        tunjangan_jabatan=karyawan.jabatan.tunjangan_jabatan if karyawan.jabatan else 0,
+                        tunjangan_makan=tunjangan_makan,
+                        tunjangan_transport=tunjangan_transport,
+                        cabang=karyawan.cabang,
+                        metode_pembayaran=metode_pembayaran,
+                        dibuat_oleh=request.user  # User yang menjalankan generate
+                    )
+                    created_slips.append(slip_baru)
+                    created_count += 1
+
+            for slip_baru in created_slips:
                 # Kirim notifikasi Telegram
                 try:
                     from apps.automation.signals import kirim_notifikasi_penggajian
                     kirim_notifikasi_penggajian(slip_baru)
                 except Exception:
                     pass
-                
-                created_count += 1
 
             # Tampilkan ringkasan hasil generate
             messages.success(
@@ -1349,6 +1780,262 @@ class GeneratePenggajianView(CreatePermissionMixin, TemplateView):
         # Render template HTML dengan data konteks
         return render(request, self.template_name, context)
 
+
+
+class ImportPenggajianView(CreatePermissionMixin, TemplateView):
+    """
+    Import penggajian massal dari file Excel/CSV.
+
+    URL: /hr/penggajian/import/
+    Permission: hr.create
+    Template: hr/penggajian_import.html
+
+    Alur kerja (POST):
+    1. Validasi file upload (format, ukuran)
+    2. Baca data dari Excel/CSV
+    3. Validasi setiap baris (NIK ada, periode valid, tidak duplikat)
+    4. Buat slip gaji baru dalam transaction.atomic()
+    5. Report: berapa sukses, gagal, dilewati
+    """
+    template_name = 'hr/penggajian_import.html'
+    # Modul permission yang dicek: 'hr'
+    permission_module = 'hr'
+    permission_sub_module = 'penggajian_import'
+
+    def get_context_data(self, **kwargs):
+        """Menyediakan jumlah karyawan aktif untuk info di template."""
+        context = TemplateLayout.init(self, super().get_context_data(**kwargs))
+        context['karyawan_count'] = Karyawan.objects.filter(aktif=True, status='aktif').count()
+        return context
+
+    def post(self, request, *args, **kwargs):
+        """Proses import file Excel/CSV untuk membuat slip gaji massal."""
+        is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+        file = request.FILES.get('file')
+
+        if not file:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': 'File tidak ditemukan. Silakan pilih file untuk diupload.'})
+            messages.error(request, 'File tidak ditemukan. Silakan pilih file untuk diupload.')
+            return redirect('hr:penggajian-import')
+
+        # Validasi ukuran file (max 5MB)
+        if file.size > 5 * 1024 * 1024:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': 'Ukuran file terlalu besar. Maksimal 5MB.'})
+            messages.error(request, 'Ukuran file terlalu besar. Maksimal 5MB.')
+            return redirect('hr:penggajian-import')
+
+        file_name = file.name.lower()
+        rows = []
+
+        try:
+            if file_name.endswith(('.xlsx', '.xls')):
+                rows = self._read_excel(file)
+            elif file_name.endswith('.csv'):
+                rows = self._read_csv(file)
+            else:
+                if is_ajax:
+                    return JsonResponse({'success': False, 'message': 'Format file tidak didukung. Gunakan .xlsx, .xls, atau .csv'})
+                messages.error(request, 'Format file tidak didukung. Gunakan .xlsx, .xls, atau .csv')
+                return redirect('hr:penggajian-import')
+        except Exception as e:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': f'Gagal membaca file: {str(e)}'})
+            messages.error(request, f'Gagal membaca file: {str(e)}')
+            return redirect('hr:penggajian-import')
+
+        if not rows:
+            if is_ajax:
+                return JsonResponse({'success': False, 'message': 'File kosong atau tidak memiliki data yang valid.'})
+            messages.error(request, 'File kosong atau tidak memiliki data yang valid.')
+            return redirect('hr:penggajian-import')
+
+        # Proses import
+        from django.db import transaction
+        created_count = 0
+        skipped_count = 0
+        error_messages = []
+        default_metode_pembayaran = get_default_payroll_payment_method()
+
+        for idx, row in enumerate(rows, start=2):  # start=2 karena baris 1 = header
+            nik = str(row.get('nik_karyawan', '')).strip()
+            periode_bulan = row.get('periode_bulan')
+            periode_tahun = row.get('periode_tahun')
+
+            # Validasi field wajib
+            if not nik:
+                error_messages.append(f'Baris {idx}: NIK Karyawan kosong')
+                continue
+            if not periode_bulan or not periode_tahun:
+                error_messages.append(f'Baris {idx}: Periode bulan/tahun kosong')
+                continue
+
+            try:
+                periode_bulan = int(float(str(periode_bulan)))
+                periode_tahun = int(float(str(periode_tahun)))
+            except (ValueError, TypeError):
+                error_messages.append(f'Baris {idx}: Periode bulan/tahun tidak valid')
+                continue
+
+            if not (1 <= periode_bulan <= 12):
+                error_messages.append(f'Baris {idx}: Periode bulan harus 1-12')
+                continue
+
+            # Cari karyawan berdasarkan NIK
+            try:
+                karyawan = Karyawan.objects.get(nik=nik)
+            except Karyawan.DoesNotExist:
+                error_messages.append(f'Baris {idx}: Karyawan dengan NIK "{nik}" tidak ditemukan')
+                continue
+
+            # Cek duplikasi
+            exists = Penggajian.objects.filter(
+                karyawan=karyawan,
+                periode_bulan=periode_bulan,
+                periode_tahun=periode_tahun
+            ).exists()
+
+            if exists:
+                skipped_count += 1
+                continue
+
+            # Parse komponen gaji — helper untuk parse decimal
+            def parse_decimal(val, default=Decimal('0')):
+                if val is None or str(val).strip() == '':
+                    return default
+                try:
+                    return Decimal(str(val).strip().replace(',', ''))
+                except Exception:
+                    return default
+
+            gaji_pokok_val = parse_decimal(row.get('gaji_pokok'))
+            if gaji_pokok_val == 0:
+                # Ambil dari data karyawan / jabatan
+                gaji_pokok_val = karyawan.gaji_pokok or (karyawan.jabatan.gaji_pokok if karyawan.jabatan else Decimal('0'))
+
+            tunjangan_jabatan_val = parse_decimal(row.get('tunjangan_jabatan'))
+            if tunjangan_jabatan_val == 0 and not row.get('tunjangan_jabatan'):
+                # Jika tidak disediakan di file, ambil dari jabatan
+                tunjangan_jabatan_val = karyawan.jabatan.tunjangan_jabatan if karyawan.jabatan else Decimal('0')
+
+            # Parse status
+            status_val = str(row.get('status', 'draft')).strip().lower()
+            if status_val not in ('draft', 'diproses', 'dibayar', 'batal'):
+                status_val = 'draft'
+
+            try:
+                with transaction.atomic():
+                    slip = Penggajian.objects.create(
+                        karyawan=karyawan,
+                        periode_bulan=periode_bulan,
+                        periode_tahun=periode_tahun,
+                        gaji_pokok=gaji_pokok_val,
+                        tunjangan_jabatan=tunjangan_jabatan_val,
+                        tunjangan_makan=parse_decimal(row.get('tunjangan_makan')),
+                        tunjangan_transport=parse_decimal(row.get('tunjangan_transport')),
+                        tunjangan_lainnya=parse_decimal(row.get('tunjangan_lainnya')),
+                        lembur=parse_decimal(row.get('lembur')),
+                        bonus=parse_decimal(row.get('bonus')),
+                        potongan_bpjs_kesehatan=parse_decimal(row.get('bpjs_kesehatan')),
+                        potongan_bpjs_ketenagakerjaan=parse_decimal(row.get('bpjs_ketenagakerjaan')),
+                        potongan_pph21=parse_decimal(row.get('pph21')),
+                        potongan_lainnya=parse_decimal(row.get('potongan_lainnya')),
+                        status=status_val,
+                        cabang=karyawan.cabang,
+                        metode_pembayaran=default_metode_pembayaran,
+                        catatan=str(row.get('catatan', '')).strip() or None,
+                        dibuat_oleh=request.user,
+                    )
+
+                    if slip.status == 'dibayar':
+                        create_penggajian_payment_journal(slip, user=request.user)
+
+                    # Kirim notifikasi Telegram
+                    try:
+                        from apps.automation.signals import kirim_notifikasi_penggajian
+                        kirim_notifikasi_penggajian(slip)
+                    except Exception:
+                        pass
+
+                    created_count += 1
+            except Exception as e:
+                error_messages.append(f'Baris {idx}: Gagal membuat slip - {str(e)}')
+
+        # Ringkasan hasil
+        msg_parts = []
+        if created_count > 0:
+            msg_parts.append(f'{created_count} slip gaji berhasil diimpor')
+        if skipped_count > 0:
+            msg_parts.append(f'{skipped_count} dilewati (sudah ada)')
+        if error_messages:
+            msg_parts.append(f'{len(error_messages)} error')
+
+        result_message = '. '.join(msg_parts) + '.' if msg_parts else 'Tidak ada data yang diproses.'
+
+        # Tambahkan error detail (max 10)
+        if error_messages:
+            detail = '<br><br><strong>Detail Error:</strong><ul>'
+            for err in error_messages[:10]:
+                detail += f'<li>{err}</li>'
+            if len(error_messages) > 10:
+                detail += f'<li>...dan {len(error_messages) - 10} error lainnya</li>'
+            detail += '</ul>'
+            result_message += detail
+
+        if is_ajax:
+            return JsonResponse({
+                'success': created_count > 0,
+                'message': result_message,
+                'created': created_count,
+                'skipped': skipped_count,
+                'errors': len(error_messages)
+            })
+
+        # Fallback untuk non-AJAX request
+        if created_count > 0:
+            messages.success(request, result_message)
+            return redirect('hr:penggajian')
+        else:
+            messages.error(request, result_message)
+            return redirect('hr:penggajian-import')
+
+    def _read_excel(self, file):
+        """Baca file Excel (.xlsx/.xls) dan return list of dict."""
+        import openpyxl
+        wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
+        ws = wb.active
+        rows_data = []
+        headers = []
+        for idx, row in enumerate(ws.iter_rows(values_only=True)):
+            if idx == 0:
+                headers = [str(cell).strip().lower().replace(' ', '_') if cell else '' for cell in row]
+                continue
+            if all(cell is None or str(cell).strip() == '' for cell in row):
+                continue
+            row_dict = {}
+            for col_idx, cell in enumerate(row):
+                if col_idx < len(headers) and headers[col_idx]:
+                    row_dict[headers[col_idx]] = cell
+            if row_dict:
+                rows_data.append(row_dict)
+        wb.close()
+        return rows_data
+
+    def _read_csv(self, file):
+        """Baca file CSV dan return list of dict."""
+        import csv
+        import io
+        content = file.read().decode('utf-8-sig')
+        reader = csv.DictReader(io.StringIO(content))
+        rows_data = []
+        for row in reader:
+            normalized = {}
+            for key, value in row.items():
+                if key:
+                    normalized[key.strip().lower().replace(' ', '_')] = value
+            rows_data.append(normalized)
+        return rows_data
 
 
 class PenggajianUpdateStatusView(UpdatePermissionMixin, UpdateView):
@@ -1370,8 +2057,90 @@ class PenggajianUpdateStatusView(UpdatePermissionMixin, UpdateView):
 
     def form_valid(self, form):
         """Update status penggajian."""
+        with transaction.atomic():
+            self.object = form.save(commit=False)
+            if self.object.status == 'dibayar' and not self.object.tanggal_bayar:
+                self.object.tanggal_bayar = timezone.now().date()
+            if self.object.status == 'dibayar':
+                if not self.object.cabang_id and self.object.karyawan_id:
+                    self.object.cabang = self.object.karyawan.cabang
+                if not self.object.metode_pembayaran_id:
+                    self.object.metode_pembayaran = get_default_payroll_payment_method()
+            self.object.save()
+
+            if self.object.status == 'dibayar':
+                create_penggajian_payment_journal(self.object, user=self.request.user)
+
         messages.success(self.request, 'Status penggajian berhasil diupdate')
-        return super().form_valid(form)
+        return redirect(self.get_success_url())
+
+
+@login_required
+def penggajian_update_status_ajax(request, pk):
+    """
+    AJAX endpoint untuk update status slip gaji.
+    URL: /hr/penggajian/<pk>/update-status-ajax/
+    Method: POST
+    Body (form): status, tanggal_bayar (opsional)
+    Response: JSON {success, message, status, status_label, status_class}
+    """
+    if not request.user.is_superuser and not has_permission(request.user, 'update', 'hr'):
+        return JsonResponse({'success': False, 'message': 'Tidak memiliki izin.'}, status=403)
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': 'Method tidak diizinkan.'}, status=405)
+
+    slip = get_object_or_404(Penggajian, pk=pk)
+    new_status = request.POST.get('status', '').strip()
+    STATUS_VALID = ['draft', 'diproses', 'dibayar', 'batal']
+    if new_status not in STATUS_VALID:
+        return JsonResponse({'success': False, 'message': 'Status tidak valid.'}, status=400)
+
+    try:
+        with transaction.atomic():
+            old_status = slip.status
+
+            # Validasi MetodePembayaran mapping sebelum bayar (untuk jurnal otomatis)
+            if new_status == 'dibayar' and old_status != 'dibayar':
+                from apps.core.validators import validate_metode_pembayaran_mapping
+                from apps.kas_bank.services import metode_is_credit
+                if slip.metode_pembayaran and not metode_is_credit(slip.metode_pembayaran):
+                    validate_metode_pembayaran_mapping(slip.metode_pembayaran)
+
+            slip.status = new_status
+            if new_status == 'dibayar' and not slip.tanggal_bayar:
+                slip.tanggal_bayar = timezone.now().date()
+            update_fields = ['status', 'tanggal_bayar', 'diupdate_pada']
+            if new_status == 'dibayar':
+                if not slip.cabang_id and slip.karyawan_id:
+                    slip.cabang = slip.karyawan.cabang
+                    update_fields.append('cabang')
+                if not slip.metode_pembayaran_id:
+                    slip.metode_pembayaran = get_default_payroll_payment_method()
+                    if slip.metode_pembayaran_id:
+                        update_fields.append('metode_pembayaran')
+            slip.save(update_fields=update_fields)
+            jurnal = None
+            if new_status == 'dibayar' and old_status != 'dibayar':
+                jurnal = create_penggajian_payment_journal(slip, user=request.user)
+
+        STATUS_LABELS = {
+            'draft': ('Draft', 'secondary'),
+            'diproses': ('Diproses', 'warning'),
+            'dibayar': ('Dibayar', 'success'),
+            'batal': ('Batal', 'danger'),
+        }
+        label, css_class = STATUS_LABELS.get(new_status, (new_status, 'secondary'))
+        return JsonResponse({
+            'success': True,
+            'message': f'Status berhasil diubah ke {label}.',
+            'status': new_status,
+            'status_label': label,
+            'status_class': css_class,
+            'tanggal_bayar': slip.tanggal_bayar.strftime('%d %B %Y') if slip.tanggal_bayar else None,
+            'has_journal': jurnal is not None,
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': f'Gagal mengubah status: {str(e)}'}, status=500)
 
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -1447,6 +2216,9 @@ def save_face_encoding(request):
     5. Return jumlah total foto terdaftar
     """
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'create', 'hr'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mendaftarkan wajah karyawan.'}, status=403)
+
         # Cek apakah library face_recognition tersedia
         if not FACE_RECOGNITION_ENABLED:
             return JsonResponse({
@@ -1549,6 +2321,9 @@ def delete_face(request, pk):
     hanya mengubah field aktif menjadi False (soft delete).
     """
     if request.method == 'DELETE' or request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'delete', 'hr'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk menghapus foto wajah karyawan.'}, status=403)
+
         # Blok penanganan error - coba jalankan kode di bawah
         try:
             # Query database - ambil satu data foto
@@ -1701,6 +2476,9 @@ def absensi_face_clock_in(request):
     5. Simpan record absensi dengan foto selfie dan confidence score
     """
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'create', 'hr', 'absensi'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk membuat data absensi.'}, status=403)
+
         # Cek library face_recognition
         if not FACE_RECOGNITION_ENABLED:
             return JsonResponse({
@@ -1717,7 +2495,8 @@ def absensi_face_clock_in(request):
 
         # Blok penanganan error - coba jalankan kode di bawah
         try:
-            # Ambil pengaturan absensi yang aktif (jam masuk, toleransi, lokasi)
+            # Ambil pengaturan absensi default dulu (untuk validasi lokasi awal)
+            # Setelah karyawan teridentifikasi, akan di-fetch ulang sesuai cabang karyawan
             pengaturan = PengaturanAbsensi.get_active()
 
             # ===== VALIDASI LOKASI =====
@@ -1782,6 +2561,10 @@ def absensi_face_clock_in(request):
             today = timezone.now().date()
             now = timezone.now().time()
 
+            # ===== RE-FETCH PENGATURAN BERDASARKAN CABANG KARYAWAN =====
+            # Setelah karyawan teridentifikasi, ambil pengaturan sesuai cabang
+            pengaturan = PengaturanAbsensi.get_active(cabang=karyawan.cabang)
+
             # ===== TENTUKAN STATUS ABSENSI =====
             # Gunakan pengaturan jam masuk + toleransi untuk menentukan hadir/terlambat
             jam_masuk_pengaturan = pengaturan.jam_masuk if pengaturan else None
@@ -1808,6 +2591,7 @@ def absensi_face_clock_in(request):
                 foto_file = ContentFile(foto_data, name=f'clockin_{karyawan.pk}_{today}.jpg')
 
             # ===== HITUNG JARAK (jika lokasi tersedia tapi tidak wajib) =====
+            lokasi_masuk_str = None
             if 'clock_in_distance' not in dir():
                 clock_in_distance = None
                 if user_latitude and user_longitude and pengaturan and pengaturan.latitude and pengaturan.longitude:
@@ -1820,6 +2604,13 @@ def absensi_face_clock_in(request):
                     except Exception:
                         pass
 
+            # Simpan string koordinat GPS masuk
+            if user_latitude and user_longitude:
+                try:
+                    lokasi_masuk_str = f"{float(user_latitude)},{float(user_longitude)}"
+                except (ValueError, TypeError):
+                    pass
+
             # ===== BUAT RECORD ABSENSI =====
             # get_or_create: cek duplikasi (1 karyawan = 1 absensi/hari)
             absensi, created = Absensi.objects.get_or_create(
@@ -1830,7 +2621,10 @@ def absensi_face_clock_in(request):
                     'status': status_absensi,
                     'foto_masuk': foto_file,
                     'persentase_kemiripan': round(confidence * 100, 1) if confidence else None,  # Simpan confidence
+                    'lokasi_masuk': lokasi_masuk_str,  # Simpan koordinat GPS masuk
                     'jarak_masuk': clock_in_distance,  # Simpan jarak dari kantor
+                    'cabang': karyawan.cabang,
+                    'pengaturan_snapshot': pengaturan,
                 }
             )
 
@@ -1890,6 +2684,9 @@ def absensi_face_clock_out(request):
     4. Update jam_keluar dan simpan foto clock out
     """
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'update', 'hr', 'absensi'):
+            return JsonResponse({'success': False, 'message': 'Anda tidak memiliki izin untuk mengubah data absensi.'}, status=403)
+
         # Cek library face_recognition
         if not FACE_RECOGNITION_ENABLED:
             return JsonResponse({
@@ -1906,7 +2703,7 @@ def absensi_face_clock_out(request):
 
         # Blok penanganan error - coba jalankan kode di bawah
         try:
-            # Ambil pengaturan absensi yang aktif
+            # Ambil pengaturan absensi default dulu (untuk validasi lokasi awal)
             pengaturan = PengaturanAbsensi.get_active()
 
             # ===== VALIDASI LOKASI =====
@@ -1967,6 +2764,9 @@ def absensi_face_clock_out(request):
             today = timezone.now().date()
             now = timezone.now().time()
 
+            # ===== RE-FETCH PENGATURAN BERDASARKAN CABANG KARYAWAN =====
+            pengaturan = PengaturanAbsensi.get_active(cabang=karyawan.cabang)
+
             # ===== SIMPAN FOTO CLOCK OUT =====
             foto_file = None
             if foto_base64:
@@ -2010,6 +2810,14 @@ def absensi_face_clock_out(request):
                         except Exception:
                             pass
                 absensi.jarak_keluar = clock_out_distance
+
+                # Simpan string koordinat GPS keluar
+                if user_latitude and user_longitude:
+                    try:
+                        absensi.lokasi_keluar = f"{float(user_latitude)},{float(user_longitude)}"
+                    except (ValueError, TypeError):
+                        pass
+
                 absensi.save()
 
                 return JsonResponse({
@@ -2055,7 +2863,7 @@ def absensi_face_clock_out(request):
 # ║  Mendukung multiple pengaturan, hanya 1 yang aktif            ║
 # ╚══════════════════════════════════════════════════════════════╝
 @method_decorator(login_required, name='dispatch')
-class PengaturanAbsensiView(TemplateView):
+class PengaturanAbsensiView(ReadPermissionMixin, TemplateView):
     """
     Halaman pengaturan absensi - kelola jam masuk/pulang, lokasi, toleransi.
 
@@ -2066,6 +2874,8 @@ class PengaturanAbsensiView(TemplateView):
     Menampilkan form edit pengaturan aktif + daftar semua pengaturan.
     """
     template_name = 'hr/pengaturan_absensi.html'
+    permission_module = 'hr'
+    permission_sub_module = 'pengaturan_absensi'
 
     def get_context_data(self, **kwargs):
         """
@@ -2133,7 +2943,7 @@ class PengaturanAbsensiView(TemplateView):
 
 
 @method_decorator(login_required, name='dispatch')
-class PengaturanAbsensiCreateView(TemplateView):
+class PengaturanAbsensiCreateView(CreatePermissionMixin, TemplateView):
     """
     Form untuk membuat pengaturan absensi baru (preset baru).
 
@@ -2141,6 +2951,8 @@ class PengaturanAbsensiCreateView(TemplateView):
     Template: hr/pengaturan_absensi_form.html
     """
     template_name = 'hr/pengaturan_absensi_form.html'
+    permission_module = 'hr'
+    permission_sub_module = 'pengaturan_absensi'
 
     def get_context_data(self, **kwargs):
         """Menyediakan form kosong dan flag is_new=True."""
@@ -2172,7 +2984,7 @@ class PengaturanAbsensiCreateView(TemplateView):
 
 
 @method_decorator(login_required, name='dispatch')
-class PengaturanAbsensiUpdateView(TemplateView):
+class PengaturanAbsensiUpdateView(UpdatePermissionMixin, TemplateView):
     """
     Form untuk mengedit pengaturan absensi yang sudah ada.
 
@@ -2180,6 +2992,8 @@ class PengaturanAbsensiUpdateView(TemplateView):
     Template: hr/pengaturan_absensi_form.html
     """
     template_name = 'hr/pengaturan_absensi_form.html'
+    permission_module = 'hr'
+    permission_sub_module = 'pengaturan_absensi'
 
     def get_context_data(self, **kwargs):
         """Menyediakan form yang diisi dengan data pengaturan yang diedit."""
@@ -2226,6 +3040,10 @@ def pengaturan_absensi_delete(request, pk):
     pengaturan = get_object_or_404(PengaturanAbsensi, pk=pk)
 
     if request.method == 'POST':
+        if not request.user.is_superuser and not has_permission(request.user, 'delete', 'hr', 'pengaturan_absensi'):
+            messages.error(request, 'Anda tidak memiliki izin untuk menghapus pengaturan absensi.')
+            return redirect('hr:pengaturan-absensi')
+
         nama = pengaturan.nama            # Simpan nama sebelum dihapus
         pengaturan.delete()               # Hapus dari database
         # Tampilkan pesan sukses ke user
@@ -2250,6 +3068,10 @@ def pengaturan_absensi_activate(request, pk):
     """
     pengaturan = get_object_or_404(PengaturanAbsensi, pk=pk)
 
+    if not request.user.is_superuser and not has_permission(request.user, 'update', 'hr', 'pengaturan_absensi'):
+        messages.error(request, 'Anda tidak memiliki izin untuk mengaktifkan pengaturan absensi.')
+        return redirect('hr:pengaturan-absensi')
+
     pengaturan.aktif = True
     pengaturan.save()  # save() akan otomatis nonaktifkan yang lain (single active)
 
@@ -2257,3 +3079,34 @@ def pengaturan_absensi_activate(request, pk):
     messages.success(request, f'Pengaturan "{pengaturan.nama}" berhasil diaktifkan!')
     # Redirect ke halaman tujuan
     return redirect('hr:pengaturan-absensi')
+
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║              CANCEL PENGGAJIAN                                 ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+@login_required
+@require_http_methods(["POST"])
+def cancel_penggajian(request, pk):
+    """Cancel penggajian yang sudah dibayar. URL: /hr/penggajian/<pk>/cancel/ (POST AJAX)"""
+    from django.http import JsonResponse
+    from apps.hr.models import Penggajian
+    from apps.hr.services import transition_penggajian_status
+    from apps.core.permissions import has_permission, is_superuser_role
+
+    if not is_superuser_role(request.user) and not has_permission(request.user, 'write', 'hr'):
+        return JsonResponse({'success': False, 'message': 'Anda tidak memiliki akses.'}, status=403)
+
+    try:
+        penggajian = Penggajian.objects.get(pk=pk)
+    except Penggajian.DoesNotExist:
+        return JsonResponse({'success': False, 'message': 'Data penggajian tidak ditemukan.'}, status=404)
+
+    if penggajian.status not in ['draft', 'diproses', 'dibayar']:
+        return JsonResponse({'success': False, 'message': f'Penggajian dengan status "{penggajian.get_status_display()}" tidak bisa dibatalkan.'}, status=400)
+
+    try:
+        transition_penggajian_status(penggajian, 'batal', user=request.user)
+        return JsonResponse({'success': True, 'message': f'Penggajian {penggajian.karyawan.nama} berhasil dibatalkan.'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': f'Gagal membatalkan: {str(e)}'}, status=400)

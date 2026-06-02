@@ -125,6 +125,10 @@
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   }
 
+  #saleThisMonthChart {
+    min-height: 120px;
+  }
+
   /* ═══════════════════════════════════════════════════════════════════
      MOBILE ≤ 576px — Hanya styling SPESIFIK dashboard
      (Aturan umum sudah di global styles.html)
@@ -305,11 +309,25 @@
     // selama bulan berjalan. Data diambil dari tag JSON Django.
     // Library: ApexCharts
     // ─────────────────────────────────────────────────────────────────
-    const saleThisMonthChartEl = document.querySelector('#saleThisMonthChart'),
-      // Ambil label tanggal dari JSON yang di-inject Django ke HTML
-      chartLabelsEl = document.getElementById('sales-chart-labels'),
-      chartLabels = chartLabelsEl ? JSON.parse(chartLabelsEl.textContent) : [],
-      saleThisMonthChartConfig = {
+    const saleThisMonthChartEl = document.querySelector('#saleThisMonthChart');
+
+    function readDashboardJson(id, fallback) {
+      const el = document.getElementById(id);
+      if (!el) return fallback;
+      try {
+        const parsed = JSON.parse(el.textContent || 'null');
+        return Array.isArray(parsed) ? parsed : fallback;
+      } catch (err) {
+        return fallback;
+      }
+    }
+
+    const chartLabels = readDashboardJson('sales-chart-labels', []);
+    const chartSeriesData = readDashboardJson('sales-chart-data', []);
+    const safeChartSeriesData = chartSeriesData.length ? chartSeriesData : [0];
+    const safeChartLabels = chartLabels.length ? chartLabels : ['-'];
+
+    const saleThisMonthChartConfig = {
         chart: {
           height: 120,         // Tinggi chart 120px (compact)
           type: 'area',        // Tipe: area chart (garis + fill di bawah)
@@ -324,7 +342,7 @@
         },
         tooltip: {
           enabled: true,
-          x: { show: true, formatter: function (val, opts) { return 'Tgl ' + (chartLabels[opts.dataPointIndex] || val); } },
+          x: { show: true, formatter: function (val, opts) { return 'Tgl ' + (safeChartLabels[opts.dataPointIndex] || val); } },
           y: { formatter: function (val) { return 'Rp ' + val.toLocaleString('id-ID'); } }
         },
         colors: [config.colors.primary],
@@ -333,12 +351,12 @@
           gradient: { shade: 'light', type: 'vertical', shadeIntensity: 0.4, opacityFrom: 0.8, opacityTo: 0.1, stops: [0, 100] }
         },
         stroke: { width: 2, curve: 'smooth' },
-        series: [{ name: 'Penjualan', data: JSON.parse(document.getElementById('sales-chart-data').textContent) }],
+        series: [{ name: 'Penjualan', data: safeChartSeriesData }],
         xaxis: {
           labels: { show: false },
           axisTicks: { show: false },
           axisBorder: { show: false },
-          categories: chartLabels
+          categories: safeChartLabels
         },
         yaxis: { min: 0, labels: { show: false } }
       };
@@ -707,9 +725,15 @@
 {% block content %}
 {# Filter waktu sudah dipindahkan ke icon di navbar #}
 
-
-
-
+<!-- Label Sumber Data Dashboard -->
+<div class="mb-4">
+    <span class="badge bg-label-warning rounded-pill px-3 py-2">
+        <i class="ri-dashboard-line me-1"></i>Dashboard Operasional Real-time
+    </span>
+    <small class="text-muted ms-2" style="cursor:help" data-bs-toggle="tooltip" data-bs-placement="right" title="Data bersumber langsung dari transaksi operasional (POS, Sales Order, Purchase Order, Biaya). Pendapatan SO memakai nilai bersih setelah diskon termasuk ongkir dan tanpa PPN; POS memakai subtotal setelah diskon. Pembelian PO memakai DPP/subtotal termasuk ongkir. Kas masuk/keluar dapat mencakup PPN sesuai pembayaran aktual. Untuk laporan akuntansi resmi, gunakan Modul Akuntansi - Neraca / Laba Rugi.">
+        <i class="ri-information-line"></i> Apa artinya?
+    </small>
+</div>
 
 
 <div class="row g-6 mb-6">
@@ -754,7 +778,7 @@
           </div>
           <div class="card-info">
             <h5 class="mb-0" data-bs-toggle="tooltip" data-bs-placement="top"
-              title="Total harga beli × (stok saat ini + qty terjual) dari semua produk yang pernah masuk ke sistem">{{ sales_overview.total_keseluruhan_aset|rupiah }}</h5>
+              title="Total harga beli × qty historis (stok + terjual SO + terjual POS konversi + adj_out) dari semua produk">{{ sales_overview.total_keseluruhan_aset|rupiah }}</h5>
             <p class="mb-0">Total Aset</p>
           </div>
         </div>
@@ -830,12 +854,12 @@
         </div>
         <div class="mb-2">
           <h4 class="mb-0 text-truncate" data-bs-toggle="tooltip" data-bs-placement="top"
-            title="Keuntungan kotor = (Harga Jual − Harga Beli) × Jumlah terjual, dari Sales Order + POS Transaction">{{ profit_data.gross_profit|rupiah }}</h4>
+            title="Keuntungan kotor = pendapatan bersih tanpa PPN - HPP dari barang terjual. SO menghitung subtotal setelah diskon termasuk ongkir; POS menghitung subtotal setelah diskon. Qty SO memakai qty transaksi, POS memakai qty konversi satuan dasar.">{{ profit_data.gross_profit|rupiah }}</h4>
         </div>
         <div>
           <small class="{% if profit_data.is_profit %}text-success{% else %}text-danger{% endif %} fw-medium"
             data-bs-toggle="tooltip" data-bs-placement="bottom"
-            title="Profit Margin = Keuntungan Kotor ÷ Total Pendapatan × 100%">{% if profit_data.is_profit %}+{% endif %}{{ profit_data.margin_percent }}% margin</small>
+            title="Profit Margin = Keuntungan Kotor / Pendapatan Bersih x 100%. Pendapatan SO termasuk ongkir, dan PPN tidak dihitung sebagai pendapatan.">{% if profit_data.is_profit %}+{% endif %}{{ profit_data.margin_percent }}% margin</small>
         </div>
         <div class="position-absolute" style="top: 1.5rem; right: 1.5rem;">
           <div class="avatar">
@@ -861,7 +885,7 @@
             <div class="col-12">
               <h5 class="text-white mb-0">{{ week_data.category }}</h5>
               <div class="d-flex align-items-center gap-2">
-                <div>Total {{ week_data.earning }} Pendapatan</div>
+                <div>Total {{ week_data.earning }} Pendapatan Bersih</div>
                 <div class="d-flex align-items-center text-success">
                   <p class="mb-0 fw-medium">{{ week_data.growth }} Trx</p>
                 </div>
@@ -967,9 +991,9 @@
       <div class="card-body position-relative">
         <div class="card-info mb-3">
           <h5 class="mb-2">Bulan Ini</h5>
-          <p class="mb-0">Total Penjualan</p>
+          <p class="mb-0">Pendapatan Bersih</p>
           <h5 class="mb-0" data-bs-toggle="tooltip" data-bs-placement="top"
-            title="Total penjualan bulan ini dari Sales Order + Transaksi POS yang sudah lunas">{{ sales_this_month|rupiah }}</h5>
+            title="Pendapatan bersih dari Sales Order + POS. SO dihitung setelah diskon termasuk ongkir, POS setelah diskon, tanpa PPN. Periode: {{ sales_this_month_label }}">{{ sales_this_month|rupiah }}</h5>
         </div>
         <div class="position-absolute" style="top: 1.5rem; right: 1.5rem;">
           <div class="avatar">

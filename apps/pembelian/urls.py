@@ -38,6 +38,8 @@ urlpatterns = [
     
     # ===== PURCHASE ORDER CRUD =====
     path('purchase-order/', views.PurchaseOrderListView.as_view(), name='purchase-order'),
+    # URL: /pembelian/purchase-order/import/ — purchase-order-import
+    path('purchase-order/import/', views.PurchaseOrderImportView.as_view(), name='purchase-order-import'),
     # URL: /pembelian/purchase-order/add/ — purchase-order-add
     path('purchase-order/add/', views.PurchaseOrderCreateView.as_view(), name='purchase-order-add'),
     # URL: /pembelian/purchase-order/<int:pk>/ — purchase-order-detail
@@ -50,4 +52,6 @@ urlpatterns = [
     path('purchase-order/<int:pk>/receive/', views.purchase_order_receive, name='purchase-order-receive'),
     # URL: /pembelian/purchase-order/<int:pk>/delete/ — purchase-order-delete
     path('purchase-order/<int:pk>/delete/', views.PurchaseOrderDeleteView.as_view(), name='purchase-order-delete'),
+    # URL: /pembelian/purchase-order/<int:pk>/cancel/ — purchase-order-cancel (POST AJAX)
+    path('purchase-order/<int:pk>/cancel/', views.cancel_purchase_order, name='purchase-order-cancel'),
 ]

@@ -153,34 +153,36 @@ class Akun(models.Model):
             parent = parent.parent
         return level
 
+    def clean(self):
+        if self.parent_id:
+            visited = {self.pk}
+            current = self.parent
+            while current:
+                if current.pk in visited:
+                    raise ValidationError("Circular parent reference detected")
+                visited.add(current.pk)
+                current = current.parent
+        # validate saldo_normal matches tipe
+        # CONTRA accounts have OPPOSITE saldo_normal from their parent tipe
+        debit_types = ['aset', 'hpp', 'beban']
+        kredit_types = ['kewajiban', 'modal', 'pendapatan']
+        contra_sub_types = ['contra_aset', 'contra_pendapatan', 'prive']
 
-class PeriodeAkuntansi(models.Model):
-    """
-    Model untuk PERIODE AKUNTANSI — Periode buka/tutup buku.
+        is_contra = self.sub_tipe in contra_sub_types
 
-    Contoh: Januari 2026, Februari 2026, dll.
-    Jurnal hanya bisa diinput ke periode yang AKTIF dan BELUM DITUTUP.
-    """
-
-    # Nama periode — contoh: 'Januari 2026'
-    nama = models.CharField(max_length=50, verbose_name="Nama Periode")
-
-    # Tanggal mulai & akhir
-    tanggal_mulai = models.DateField(verbose_name="Tanggal Mulai")
-    tanggal_akhir = models.DateField(verbose_name="Tanggal Akhir")
-
-    # Flag periode aktif — hanya 1 periode aktif pada satu waktu
-    is_aktif = models.BooleanField(default=False, verbose_name="Periode Aktif")
-
-    # Flag tutup buku — setelah ditutup, jurnal tidak bisa diubah
-    is_tutup = models.BooleanField(
-        default=False, verbose_name="Sudah Ditutup",
-        help_text="Periode yang sudah ditutup tidak dapat menerima jurnal baru"
-    )
-
-    # Timestamp
-    dibuat_pada = models.DateTimeField(auto_now_add=True)
-    diupdate_pada = models.DateTimeField(auto_now=True)
+        if self.tipe in debit_types and not is_contra and self.saldo_normal != 'debit':
+            raise ValidationError(f"Akun bertipe {self.tipe} harus memiliki saldo normal debit")
+        if self.tipe in kredit_types and not is_contra and self.saldo_normal != 'kredit':
+            raise ValidationError(f"Akun bertipe {self.tipe} harus memiliki saldo normal kredit")
+        # Contra aset (e.g. Akumulasi Penyusutan) has saldo_normal=kredit (opposite of aset)
+        if self.tipe in debit_types and is_contra and self.saldo_normal != 'kredit':
+            raise ValidationError(f"Contra akun bertipe {self.tipe} harus memiliki saldo normal kredit")
+        # Contra pendapatan (e.g. Retur/Diskon) has saldo_normal=debit (opposite of pendapatan)
+        if self.tipe in kredit_types and is_contra and self.saldo_normal != 'debit':
+            raise ValidationError(f"Contra akun bertipe {self.tipe} harus memiliki saldo normal debit")
+        # Prive (penarikan pemilik) under modal has saldo_normal=debit (opposite of modal)
+        if self.tipe == 'modal' and self.sub_tipe == 'prive' and self.saldo_normal != 'debit':
+            raise ValidationError("Akun Prive harus memiliki saldo normal debit")
 
     class Meta:
         verbose_name = "Periode Akuntansi"
@@ -199,7 +201,21 @@ class PeriodeAkuntansi(models.Model):
             if self.tanggal_mulai >= self.tanggal_akhir:
                 raise ValidationError("Tanggal mulai harus sebelum tanggal akhir.")
 
+    def save(self, *args, **kwargs):
+        """Saat periode diaktifkan, nonaktifkan periode aktif lainnya."""
+        self.full_clean()
+        if self.is_aktif:
+            PeriodeAkuntansi.objects.filter(is_aktif=True).exclude(pk=self.pk).update(is_aktif=False)
+        super().save(*args, **kwargs)
 
+
+# =====================================================================
+    # REKOMENDASI PRODUCTION: Pertimbangkan soft delete untuk model ini.
+    # Soft delete (is_deleted = BooleanField) menjaga audit trail dan
+    # mencegah kehilangan data saat record dihapus secara tidak sengaja.
+    # Implementasi: tambahkan is_deleted=True/False dan override delete()
+    # atau gunakan Django manager dengan filter is_deleted=False.
+    # =====================================================================
 class JurnalEntry(models.Model):
     """
     Model untuk JURNAL ENTRY — Header jurnal transaksi.
@@ -326,16 +342,26 @@ class JurnalEntry(models.Model):
             models.Index(fields=['sumber', 'sumber_id'], name='akt_jrn_src_id_idx'),
             models.Index(fields=['cabang', 'tanggal'], name='akt_jrn_cbg_tgl_idx'),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['sumber', 'sumber_id'],
+                condition=~models.Q(sumber='manual'),
+                name='unique_jurnal_per_source'
+            )
+        ]
 
     def __str__(self):
         return f"{self.nomor} - {self.deskripsi[:50]}"
 
     def save(self, *args, **kwargs):
-        """Override save untuk auto-generate nomor jurnal."""
-        from django.db import transaction
-        with transaction.atomic():
-            if not self.nomor:
+        """Override save untuk auto-generate nomor jurnal dan validasi."""
+        from django.db import transaction, IntegrityError
+        self.full_clean()
+        if not self.nomor:
+            with transaction.atomic():
                 self.nomor = self.generate_nomor()
+                super().save(*args, **kwargs)
+        else:
             super().save(*args, **kwargs)
 
     def generate_nomor(self):
@@ -344,8 +370,8 @@ class JurnalEntry(models.Model):
         Format: JU-{TAHUN}-{NOMOR_URUT_5_DIGIT}
         Contoh: JU-2026-00001
         """
-        from datetime import datetime
-        today = datetime.now()
+        from django.utils import timezone
+        today = timezone.now()
         prefix = f"JU-{today.year}"
 
         last_jurnal = JurnalEntry.objects.select_for_update().filter(
@@ -449,6 +475,10 @@ class JurnalLine(models.Model):
         if self.debit > 0:
             return f"{self.akun.kode} - D: {self.debit:,.0f}"
         return f"{self.akun.kode} - K: {self.kredit:,.0f}"
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     def clean(self):
         """Validasi: debit dan kredit tidak boleh keduanya > 0."""

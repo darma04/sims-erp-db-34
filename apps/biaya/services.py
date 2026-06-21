@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from django.db import transaction
+
 from apps.akuntansi.models import JurnalEntry
 from apps.akuntansi.services import create_jurnal, get_akun_by_kode
 from apps.biaya.models import TransaksiBiaya
@@ -28,14 +30,15 @@ def ensure_biaya_accounting(transaksi, user=None):
     if not akun_biaya:
         raise ValueError("Akun 6-9000 Beban Operasional Lainnya belum tersedia di CoA.")
 
-    jurnal = JurnalEntry.objects.filter(
-        sumber="biaya",
-        sumber_id=transaksi.pk,
-        is_reversed=False,
-        jurnal_asal__isnull=True,
-    ).first()
-    if not jurnal:
-        jurnal = create_jurnal(
+    with transaction.atomic():
+        jurnal = JurnalEntry.objects.select_for_update().filter(
+            sumber="biaya",
+            sumber_id=transaksi.pk,
+            is_reversed=False,
+            jurnal_asal__isnull=True,
+        ).first()
+        if not jurnal:
+            jurnal = create_jurnal(
             tanggal=transaksi.tanggal,
             deskripsi=f"Biaya Operasional - {transaksi.nomor_transaksi}",
             lines_data=[
@@ -58,24 +61,23 @@ def ensure_biaya_accounting(transaksi, user=None):
             cabang=transaksi.cabang,
             user=user or transaksi.disetujui_oleh,
             auto_post=True,
-        )
-
-    create_operational_mutation(
-        akun_kas_bank=kas_bank_account,
-        tipe="keluar",
-        tanggal=transaksi.tanggal,
-        jumlah=jumlah,
-        deskripsi=f"Pembayaran Biaya {transaksi.nomor_transaksi}",
-        akun_lawan=akun_biaya,
-        cabang=transaksi.cabang,
-        metode_pembayaran=transaksi.metode_pembayaran,
-        sumber_app="biaya",
-        sumber_model="TransaksiBiaya",
-        sumber_id=transaksi.pk,
-        sumber_ref=transaksi.nomor_transaksi,
-        jurnal_entry=jurnal,
-        user=user or transaksi.disetujui_oleh,
-    )
+            )
+            create_operational_mutation(
+                akun_kas_bank=kas_bank_account,
+                tipe="keluar",
+                tanggal=transaksi.tanggal,
+                jumlah=jumlah,
+                deskripsi=f"Pembayaran Biaya {transaksi.nomor_transaksi}",
+                akun_lawan=akun_biaya,
+                cabang=transaksi.cabang,
+                metode_pembayaran=transaksi.metode_pembayaran,
+                sumber_app="biaya",
+                sumber_model="TransaksiBiaya",
+                sumber_id=transaksi.pk,
+                sumber_ref=transaksi.nomor_transaksi,
+                jurnal_entry=jurnal,
+                user=user or transaksi.disetujui_oleh,
+            )
     return jurnal
 
 def transition_biaya_status(transaksi, new_status, user=None):

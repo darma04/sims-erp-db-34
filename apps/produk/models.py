@@ -335,7 +335,7 @@ class Produk(models.Model):
         validators=[validate_image_file]
     )
 
-    # ===== TIPE PRODUK (SIMS) =====
+    # ===== TIPE PRODUK =====
     TIPE_CHOICES = [
         ('produk', 'Produk'),
         ('sparepart', 'Sparepart'),

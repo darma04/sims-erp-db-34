@@ -135,7 +135,7 @@
                 </button>
             </div>
         </div>
-        <div class="card-datatable table-responsive">
+        <div class="card-datatable">
             <table class="datatables-departemen table table-hover" id="departemenTable" style="width:100%">
                 <thead>
                     <tr>
@@ -249,6 +249,7 @@ $(document).ready(function() {
     {% if departemen_list %}
     if (!$.fn.dataTable.isDataTable('#departemenTable')) {
     dataTable = $('#departemenTable').DataTable({
+            scrollX: true,
         language: {
             "sEmptyTable": "Tidak ada data", "sLengthMenu": "Tampilkan _MENU_ data",
             "sZeroRecords": "Tidak ditemukan data yang sesuai", "sInfo": "Menampilkan _START_ sampai _END_ dari _TOTAL_ data",

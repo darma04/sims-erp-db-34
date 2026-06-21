@@ -165,7 +165,7 @@ Fitur: filter, export Excel & PDF, delete modal.
                 </button>
             </div>
         </div>
-        <div class="card-datatable table-responsive">
+        <div class="card-datatable">
             <table class="datatables-biaya table table-hover" id="biayaTable" style="width:100%">
                 <thead>
                     <tr>
@@ -479,6 +479,7 @@ Fitur: filter, export Excel & PDF, delete modal.
 
         {% if kategori_list %}
         const table = $('#biayaTable').DataTable({
+            scrollX: true,
             language: {
                 "sEmptyTable": "Tidak ada data yang tersedia pada tabel ini",
                 "sProcessing": "Sedang memproses...",

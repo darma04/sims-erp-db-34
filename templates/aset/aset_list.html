@@ -2,30 +2,6 @@
 {% load static %}
 {% load currency_filters %}
 
-{% comment %}
-  ==========================================================================
-  ASET - Daftar Aset (List View)
-  ==========================================================================
-  Menampilkan daftar semua aset menggunakan DataTables (tabel interaktif).
-  DataTables menyediakan: search, sorting, pagination, dan export PDF/Excel
-  secara otomatis tanpa perlu coding JavaScript tambahan.
-
-  FLOW DATA:
-  - URL: /aset/ -> aset.views.AsetListView- View: Mengambil data dari database via model Aset- Template: File ini merender data ke HTML- Response: Browser menampilkan tabel + tombol aksi (edit/hapus/detail)
-
-  RELASI KE MODUL LAIN:
-  - apps/aset/models.py -> Model Aset (sumber data)- apps/aset/views.py -> AsetListView (handler)- apps/aset/urls.py -> URL routing ke view ini- apps/core/mixins.py -> ReadPermissionMixin (cek hak akses)- layout/layout_vertical.html -> Template induk (sidebar, header)
-
-  BAGIAN YANG BOLEH/TIDAK BOLEH DIUBAH:
-  - BOLEH diubah: Tampilan kolom tabel, tombol aksi, filter- BOLEH diubah: Tambah kolom baru (sesuaikan juga di views.py queryset)- JANGAN diubah: {% extends %} dan {% block %} structure- JANGAN diubah: class DataTables (break JavaScript)
-
-  TIPS & DEBUGGING:
-  - Error 'TemplateDoesNotExist'? Cek path di views.py template_name- Data tidak muncul? Cek get_queryset() di views.py- Tambah kolom? Edit <th> di <thead> dan <td> di <tbody>- Export gagal? Cek fungsi export_di_aset_list() di <script>
-
-  ==========================================================================
-{% endcomment %}
-
-
 {% block title %}Aset Tetap - Akuntansi ERP{% endblock title %}
 
 {% block vendor_css %}
@@ -57,6 +33,7 @@
         </div>
     </div>
 
+    <!-- Summary Cards -->
     <div class="row g-3 mb-4">
         <div class="col-sm-6 col-lg-3">
             <div class="card"><div class="card-body">
@@ -92,6 +69,7 @@
         </div>
     </div>
 
+    <!-- Filter Card -->
     <div class="card mb-4">
         <div class="card-body">
             <div class="row g-3">
@@ -160,6 +138,7 @@
         </div>
     </div>
 
+    <!-- Table -->
     <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
             <h5 class="mb-0">Daftar Aset</h5>
@@ -169,7 +148,7 @@
             </div>
         </div>
         <div class="card-datatable table-responsive">
-            <table class="{% if cabang_list %}accounting-data-table {% endif %}table table-hover" id="asetTable" {% if cabang_list %}data-accounting-primary="true"{% endif %} data-export-title="Daftar Aset Tetap" data-export-filename="Daftar_Aset_Tetap" data-search-placeholder="Cari aset..." data-default-order='[[0,"asc"]]'>
+            <table class="accounting-data-table table table-hover" id="asetTable" data-accounting-primary="true" data-export-title="Daftar Aset Tetap" data-export-filename="Daftar_Aset_Tetap" data-search-placeholder="Cari aset..." data-default-order='[[0,"asc"]]'>
                 <thead>
                     <tr>
                         <th>Kode</th>
@@ -217,14 +196,8 @@
                             </div>
                         </td>
                     </tr>
-                    {% empty %}
-                    <tr>
-                        <td colspan="9" class="text-center py-5">
-                            <i class="ri-building-2-line ri-3x text-muted mb-3 d-block"></i>
-                            <p class="text-muted mb-0">Belum ada aset tetap</p>
-                        </td>
-                    </tr>
                     {% endfor %}
+                    {# Tidak ada baris empty colspan — DataTables handle via language.sEmptyTable #}
                 </tbody>
                 <tfoot class="table-footer-summary">
                     <tr>
@@ -255,7 +228,7 @@
                                 <small class="d-block text-muted mt-1">Nilai Buku</small>
                             </div>
                         </td>
-                        <td colspan="3"class="text-center py-5"></td>
+                        <td colspan="3"></td>
                     </tr>
                 </tfoot>
             </table>
@@ -273,7 +246,7 @@
     .dataTables_wrapper .dataTables_paginate .paginate_button{padding:.438rem .875rem;border-radius:.375rem;margin:0 .125rem;border:none;background:transparent;color:#697a8d}
     .dataTables_wrapper .dataTables_paginate .paginate_button.current{background:#696cff!important;color:#fff!important;border:none}
     .dataTables_wrapper .dataTables_paginate .paginate_button:hover:not(.disabled){background:rgba(105,108,255,.08)!important;border:none;color:#696cff!important}
-    @media(max-width:768px){.card-datatable{overflow-x:hidden!important;max-width:100%}{% if aset_list %}#asetTable{min-width:1000px!important}{% endif %}}
+    @media(max-width:768px){.card-datatable{overflow-x:hidden!important;max-width:100%}table{min-width:1000px!important}}
 </style>
 <script>
 $(document).ready(function(){
